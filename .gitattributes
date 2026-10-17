@@ -1,0 +1,4 @@
+# 仓库内统一按 LF 存储；Windows 脚本检出时保持 CRLF，其余文本随平台自动转换
+* text=auto
+*.sh text eol=lf
+*.ps1 text eol=crlf

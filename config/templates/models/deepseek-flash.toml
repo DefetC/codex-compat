@@ -1,0 +1,13 @@
+# 只覆盖本表明确列出的属性；其他模型能力保持当前目录的值。
+[settings]
+# 模型默认强度；不等于固定子代理强度。
+default_reasoning_level = "high"
+# 保留已验证的内置子代理版本。
+multi_agent_version = "v2"
+# 允许并行工具调用。
+supports_parallel_tool_calls = true
+
+# 路径相对于 mappings.toml 所在目录；两处复用同一份可信正文。
+[text_files]
+base_instructions = "prompts/deepseek-codex.md"
+"model_messages.instructions_template" = "prompts/deepseek-codex.md"

@@ -1,0 +1,8 @@
+# 角色只承载「模型 + 思考强度」：DeepSeek 的提示词优化已由模型模板提供，
+# 这里不再重复粘贴任何角色指导，避免与模型模板产生维护分叉。
+#
+# 如需为角色追加自定义指导，可在用户级配置目录的 mappings.toml 中为该绑定
+# 改写 role_template，或直接维护生成后的 ~/.codex/agents/*.toml。
+[settings]
+# 子代理默认使用高思考强度：复杂任务下更稳，避免过早收敛。
+model_reasoning_effort = "high"

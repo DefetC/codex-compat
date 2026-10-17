@@ -1,0 +1,20 @@
+# 配置格式版本。
+version = 1
+
+# 仅精确管理明确列出的模型，不按厂商前缀扫描。
+[[bindings]]
+model_id = "ccs-deepseek/auto(free)"
+model_id_like = "auto(free)"
+model_template = "templates/models/deepseek-flash.toml"
+role_template = "templates/agents/deepseek-executor.toml"
+role_name = "deepseek_auto"
+role_description = "DeepSeek 自动路由执行角色"
+
+# Flash 与 auto 复用同一份模型配置和角色指导。
+[[bindings]]
+model_id = "ccs-deepseek/deepseek-v4.1-flash"
+model_id_like = "deepseek-v4.1-flash"
+model_template = "templates/models/deepseek-flash.toml"
+role_template = "templates/agents/deepseek-executor.toml"
+role_name = "deepseek_flash"
+role_description = "DeepSeek Flash 执行角色"

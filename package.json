@@ -1,0 +1,81 @@
+{
+  "name": "codex-compat",
+  "version": "0.1.0",
+  "description": "本地兼容层：让 Codex 在跨 provider 场景下可靠地把子代理任务投递给第三方/网关模型（如 DeepSeek）。",
+  "license": "MIT",
+  "author": "Yukun Bo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DefetC/codex-compat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DefetC/codex-compat/issues"
+  },
+  "homepage": "https://github.com/DefetC/codex-compat#readme",
+  "type": "commonjs",
+  "bin": {
+    "codex-compat": "bin/codex-compat.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "config/",
+    "install/",
+    "docs/",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "PRIVACY.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "start": "node bin/codex-compat.cjs",
+    "menu": "node bin/codex-compat.cjs",
+    "test": "npm run test:mappings && npm run test:templates && npm run test:repair-args && npm run test:like-matching && npm run test:install-safety && npm run test:trace && npm run test:compat-input && npm run test:config && npm run test:ccswitch && npm run test:ports && npm run test:headers && npm run test:rewrite && npm run test:reclaim && npm run test:settings && npm run test:preflight && npm run test:catalog && npm run test:catalog-install && npm run test:instances && npm run test:verbose && npm run test:install-e2e && npm run test:privacy && npm run test:onboarding",
+    "test:mappings": "node tests/mappings.cjs",
+    "test:templates": "node tests/templates.cjs",
+    "test:repair-args": "node tests/repair-args.cjs",
+    "test:like-matching": "node tests/like-matching.cjs",
+    "test:install-safety": "node tests/install-safety.cjs",
+    "test:trace": "node tests/trace.cjs",
+    "test:compat-input": "node tests/compat-input.cjs",
+    "test:config": "node tests/config.cjs",
+    "test:ccswitch": "node tests/ccswitch.cjs",
+    "test:ports": "node tests/ports.cjs",
+    "test:headers": "node tests/headers.cjs",
+    "test:rewrite": "node tests/rewrite.cjs",
+    "test:reclaim": "node tests/reclaim.cjs",
+    "test:settings": "node tests/settings.cjs",
+    "test:preflight": "node tests/preflight.cjs",
+    "test:catalog": "node tests/catalog.cjs",
+    "test:catalog-install": "node tests/catalog-install.cjs",
+    "test:instances": "node tests/instances.cjs",
+    "test:verbose": "node tests/verbose.cjs",
+    "test:install-e2e": "node tests/install-e2e.cjs",
+    "test:onboarding": "node tests/onboarding.cjs",
+    "test:privacy": "node tests/privacy.cjs",
+    "test:live": "node tests/mappings-live.cjs",
+    "test:smoke": "node tests/smoke.cjs",
+    "test:regression": "node tests/regression.cjs",
+    "pack:check": "node tests/package.cjs",
+    "scan:privacy": "node scripts/scan-privacy.cjs"
+  },
+  "keywords": [
+    "codex",
+    "subagent",
+    "multi-agent",
+    "deepseek",
+    "cc-switch",
+    "proxy",
+    "responses-api"
+  ],
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "fzstd": "^0.1.1"
+  }
+}

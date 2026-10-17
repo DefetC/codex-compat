@@ -1,0 +1,71 @@
+# 中文注释：codex-compat 持续集成：跨平台 / 跨 Node 版本的测试、打包内容校验与密钥泄露扫描。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # 中文注释：在三大操作系统与三个 Node 主版本上运行完整测试
+  test:
+    name: 测试 (${{ matrix.os }} / Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 中文注释：单个组合失败时不取消其余组合，便于一次看到全部平台结果
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+          - ubuntu-latest
+        node:
+          - "18"
+          - "20"
+          - "22"
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装 Node.js 并启用 npm 缓存
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+      - name: 运行测试
+        run: npm test
+
+  # 中文注释：校验 npm 发布包只包含运行所需文件，且不夹带本地运行态数据
+  pack-check:
+    name: 打包内容校验 (ubuntu-latest / Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装 Node.js 并启用 npm 缓存
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+      - name: 校验打包内容
+        run: npm run pack:check
+
+  # 中文注释：密钥泄露扫描；未配置 GITLEAKS_LICENSE（组织账号必需）时跳过该步骤
+  secret-scan:
+    name: 密钥泄露扫描 (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码（需要完整提交历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks 扫描
+        if: ${{ secrets.GITLEAKS_LICENSE != '' }}
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # 中文注释：gitleaks-action 必需，用于读取仓库元数据
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 中文注释：组织账号所需的授权码，未配置时不执行本步骤
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 运行态与本地数据（默认写入 ~/.codex-compat，此处的规则用于防止误提交）
+logs/
+backups/
+artifacts/
+profiles/
+run/
+*.log
+
+# 本地配置与临时文件
+.env
+.env.*
+*.local.json
+.codex-compat/
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
