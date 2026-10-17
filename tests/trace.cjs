@@ -86,6 +86,7 @@ setTimeout(() => {
     console.error('TRACE_TEST_FAIL: ' + err.message);
     process.exitCode = 1;
   } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    // 中文注释：Windows 上写入句柄可能稍后才释放，直接删会撞 ENOTEMPTY，重试几次再放弃
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }, 200);
