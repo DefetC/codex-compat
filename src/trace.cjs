@@ -211,6 +211,20 @@ function write(obj) {
   }
 }
 
+// 中文注释：关闭当前追踪流；测试与退出路径用它确保文件句柄释放后再清理目录
+function close() {
+  return new Promise((resolve) => {
+    if (!traceStream) {
+      resolve();
+      return;
+    }
+    const stream = traceStream;
+    traceStream = null;
+    traceBytes = 0;
+    stream.end(resolve);
+  });
+}
+
 // 中文注释：把任意形态的正文取值统一成字符串（纯字符串、{ text } 结构、内容分片数组）
 function textOfParts(value) {
   if (typeof value === 'string') {
@@ -353,4 +367,4 @@ function createStreamTracer(model) {
   };
 }
 
-module.exports = { enabled, traceRequest, createStreamTracer, traceDir, flagFile, instructionsDir };
+module.exports = { enabled, traceRequest, createStreamTracer, traceDir, flagFile, instructionsDir, close };

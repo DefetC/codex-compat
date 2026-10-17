@@ -39,7 +39,7 @@ trace.traceRequest({
 }, '/v1/responses');
 
 // 中文注释：异步写入完成后校验产物
-setTimeout(() => {
+setTimeout(async () => {
   try {
     const traceFiles = fs.readdirSync(tempRoot)
       .filter((name) => name.indexOf('trace-') === 0 && name.endsWith('.jsonl'));
@@ -86,7 +86,8 @@ setTimeout(() => {
     console.error('TRACE_TEST_FAIL: ' + err.message);
     process.exitCode = 1;
   } finally {
-    // 中文注释：Windows 上写入句柄可能稍后才释放，直接删会撞 ENOTEMPTY，重试几次再放弃
+    // 中文注释：先关闭追踪流释放句柄，Windows 上才删得掉临时目录
+    await trace.close();
     fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }, 200);
