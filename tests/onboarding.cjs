@@ -22,6 +22,8 @@ fs.writeFileSync(path.join(codexHome, 'config.toml'),
 const ENV = Object.assign({}, process.env, {
   CODEX_HOME: codexHome,
   CODEX_COMPAT_HOME: compatHome,
+  // 中文注释：下面的菜单断言按中文文案书写，这里固定语言，避免 CI runner 的英文区域设置导致误报
+  CODEX_COMPAT_LANG: 'zh',
 });
 
 // 中文注释：以子进程方式运行 CLI。
