@@ -56,13 +56,16 @@ jobs:
   secret-scan:
     name: 密钥泄露扫描 (gitleaks)
     runs-on: ubuntu-latest
+    # 中文注释：secrets 上下文不允许出现在步骤的 if 条件中，先经作业级 env 中转
+    env:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
     steps:
       - name: 检出代码（需要完整提交历史）
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: gitleaks 扫描
-        if: ${{ secrets.GITLEAKS_LICENSE != '' }}
+        if: env.GITLEAKS_LICENSE != ''
         uses: gitleaks/gitleaks-action@v2
         env:
           # 中文注释：gitleaks-action 必需，用于读取仓库元数据
