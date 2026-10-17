@@ -130,7 +130,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-compat-catalog-'));
     if (upstream) {
       await new Promise((resolve) => upstream.close(resolve));
     }
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 })().catch((err) => {
   console.error(err && err.stack || err);

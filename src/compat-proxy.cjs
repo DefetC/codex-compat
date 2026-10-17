@@ -92,6 +92,7 @@ function createEventLog(logDir, maxBytes) {
       try {
         if (stream) {
           stream.end();
+          stream = null;
         }
       } catch (err) {
         // 中文注释：关闭失败忽略
@@ -300,6 +301,8 @@ function createCompatServer(options = {}) {
 
   server.compatLog = log;
   server.compatConfig = cfg;
+  // 中文注释：服务关闭时释放日志流；Windows 上句柄不释放会挡住临时目录删除
+  server.on('close', () => log.close());
   return server;
 }
 

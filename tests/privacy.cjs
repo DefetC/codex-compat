@@ -212,8 +212,8 @@ async function main() {
     if (server.compatLog) {
       server.compatLog.close();
     }
-    fs.rmSync(logDir, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(logDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 
   console.log('PRIVACY_TEST_PASS');
