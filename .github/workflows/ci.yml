@@ -4,9 +4,11 @@ name: CI
 on:
   push:
   pull_request:
+  # 中文注释：macOS 组合只在手动触发时验证；公共仓库的 macOS runner 长期排不到，push 时会被 job 上限取消
+  workflow_dispatch:
 
 jobs:
-  # 中文注释：在三大操作系统与三个 Node 主版本上运行完整测试
+  # 中文注释：Windows 与 Ubuntu 在每次 push/PR 验证；macOS 只在手动触发时加入矩阵
   test:
     name: 测试 (${{ matrix.os }} / Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
@@ -14,10 +16,7 @@ jobs:
       # 中文注释：单个组合失败时不取消其余组合，便于一次看到全部平台结果
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - macos-latest
-          - ubuntu-latest
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["windows-latest","macos-latest","ubuntu-latest"]' || '["windows-latest","ubuntu-latest"]') }}
         node:
           - "18"
           - "20"
