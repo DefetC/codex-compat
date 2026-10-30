@@ -1,8 +1,8 @@
 // 请求改写核心（纯函数）：便于单测与离线黄金用例。
 //
-// 阶段 A：剥离协作工具 message 字段的 encrypted 标记，让官方后端返回明文参数。
+// 阶段 A：默认剥离所有父模型的协作工具 encrypted 标记，从源头生成明文参数。
 // 阶段 B：把「明文装在 encrypted_content 容器里」的 agent_message 投影成标准 user 消息。
-// 阶段 C：真密文（Fernet 前缀）发往第三方下游时显式拒绝，绝不静默投递空任务。
+// 不透明任务按明确路由策略透传或拒绝，原生历史密文不猜测解密。
 
 // 中文注释：只有这三个协作工具的 message 字段带 encrypted 标记
 const COLLAB_TOOLS = ['spawn_agent', 'send_message', 'followup_task'];
@@ -12,6 +12,16 @@ const OPAQUE_PREFIX = 'gAAAAAB';
 const DEFAULT_THIRD_PARTY_PREFIXES = ['ccs-', 'ccs/'];
 // 中文注释：官方模型命名特征
 const OFFICIAL_PATTERNS = [/^gpt-/, /^codex-/, /^o[0-9]/];
+// 此选择器请求额外的输出 token 密文，不代表输入历史中的任何密文字段。
+const OUTPUT_ENCRYPTED_INCLUDE = 'output.encrypted_content';
+const { resolveCompatPolicy } = require('./compat-policy.cjs');
+const { TextDecoder } = require('node:util');
+// 只处理已确认是摘要封装的命名空间，不触碰服务原生压缩密文。
+const COMPACTION_NAMESPACE = 'ccswitch-compaction-';
+// 已验证版本的摘要使用 Base64 文本，而不是可跨后端解密的密文。
+const COMPACTION_V1 = 'ccswitch-compaction-v1:';
+// 拒绝非法 UTF-8，不能用替换字符悄悄丢弃摘要内容。
+const SUMMARY_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 // 中文注释：判断是否官方 ChatGPT 模型
 function isOfficialModel(model) {
@@ -119,24 +129,91 @@ function stageB(parsed, stat, allowOpaque) {
   return ok;
 }
 
+// 严格核对 Base64 的字母表、填充和未使用位，不能依赖 Buffer 的宽松解码。
+function decodeCompactionSummary(value) {
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(value) || (/[+/]/.test(value) && /[-_]/.test(value))) {
+    throw new Error('摘要封装的 Base64 编码非法');
+  }
+  const standard = value.replace(/=+$/, '').replace(/-/g, '+').replace(/_/g, '/');
+  const bytes = Buffer.from(standard, 'base64');
+  const canonical = bytes.toString('base64');
+  if (canonical.replace(/=+$/, '') !== standard || (value.includes('=') && (value.length % 4 !== 0 || canonical.length !== value.length))) {
+    throw new Error('摘要封装的 Base64 填充或内容非法');
+  }
+  // 严格 UTF-8 校验后仍保留原始空白，仅拒绝没有任何正文的摘要。
+  const summary = SUMMARY_DECODER.decode(bytes);
+  if (!summary.trim()) {
+    throw new Error('摘要封装没有有效正文');
+  }
+  return summary;
+}
+
+// 摘要只降为普通 user 消息；整批校验成功后才替换，损坏时不产生部分上下文。
+function normalizeCompactionSummaries(parsed, stat, onError) {
+  if (!Array.isArray(parsed.input)) {
+    return null;
+  }
+  const out = [];
+  let projected = 0;
+  try {
+    for (const item of parsed.input) {
+      const value = item && item.type === 'compaction' && item.encrypted_content;
+      // 原生密文和普通消息不属于已验证的 CC Switch 摘要命名空间。
+      if (typeof value !== 'string' || !value.startsWith(COMPACTION_NAMESPACE)) {
+        out.push(item);
+        continue;
+      }
+      // 只认已验证版本，未知版本不能被当成空摘要或原生密文放行。
+      if (!value.startsWith(COMPACTION_V1)) {
+        throw new Error('不支持的 CC Switch 摘要封装版本');
+      }
+      const summary = decodeCompactionSummary(value.slice(COMPACTION_V1.length));
+      out.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: summary }] });
+      projected++;
+    }
+  } catch (err) {
+    if (typeof onError === 'function') {
+      onError(err);
+    } else {
+      console.error('[codex-compat] 摘要封装校验失败', err);
+    }
+    return '兼容层：CC Switch 摘要封装损坏或版本不受支持，请恢复原路由或重新提供有效上下文。';
+  }
+  if (projected) {
+    parsed.input = out;
+    stat.compactionSummariesProjected += projected;
+  }
+  return null;
+}
+
 // 中文注释：对单个请求体执行完整改写，返回判定结果与统计
 function rewriteRequest(parsed, options = {}) {
   const prefixes = options.thirdPartyPrefixes || DEFAULT_THIRD_PARTY_PREFIXES;
   const stripAlways = options.stripAlways !== false;
-  const stat = { stripped: [], projected: 0, opaque: 0, orphanOutputs: 0 };
+  const stat = { stripped: [], projected: 0, opaque: 0, orphanOutputs: 0, filteredIncludes: [], compactionSummariesProjected: 0 };
   const official = isOfficialModel(parsed.model);
   const third = isThirdPartyModel(parsed.model, prefixes);
-  const mixed = stripAlways || hasThirdPartyReference(parsed, prefixes, 0);
-  if (official && mixed) {
+  const policy = resolveCompatPolicy({ model: parsed.model, official, third }, options.upstream, options);
+  // 默认所有父模型都生成明文委托；关闭 always 时保留历史的官方混用检测行为。
+  const mixed = stripAlways || (official && hasThirdPartyReference(parsed, prefixes, 0));
+  if (mixed) {
     stageA(parsed, stat, 0);
   }
-  const ok = stageB(parsed, stat, official);
-  let reject = null;
-  if (!ok) {
-    reject = '兼容层：真密文任务正文无法投递给第三方子代理。'
-      + '请确认父请求已启用 encrypted 标记剥离（COMPAT_STRIP_ALWAYS=1），否则子代理会收到空任务。';
+  if (policy.stripOutputInclude && Array.isArray(parsed.include)) {
+    // 只删除精确的输出选择器，不建立 allowlist，也不扫描历史密文或用户文本。
+    stat.filteredIncludes = parsed.include.filter((value) => value === OUTPUT_ENCRYPTED_INCLUDE);
+    if (stat.filteredIncludes.length) {
+      parsed.include = parsed.include.filter((value) => value !== OUTPUT_ENCRYPTED_INCLUDE);
+    }
   }
-  return { official, third, stat, reject };
+  // 经 CC Switch 时保留其摘要协议；绕过它时只还原已验证的文本封装。
+  let reject = policy.unwrapCompactionSummary ? normalizeCompactionSummaries(parsed, stat, options.onNormalizationError) : null;
+  const ok = reject ? true : stageB(parsed, stat, policy.allowOpaqueTask);
+  if (!ok) {
+    reject = '兼容层：当前路由策略未允许透传不透明子代理任务，兼容层无法还原其正文。'
+      + '请重新派发明文任务，或仅在验证当前上游支持后将精确模型加入 compat.opaqueTaskModels。';
+  }
+  return { official, third, stat, reject, policy };
 }
 
 module.exports = {

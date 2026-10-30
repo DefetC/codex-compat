@@ -8,6 +8,11 @@ const fzstd = require('fzstd');
 const zlib = require('node:zlib');
 const fs = require('node:fs');
 const path = require('node:path');
+const { TextDecoder } = require('node:util');
+// 接收正文和解压结果共用默认限额，运行配置可以进一步收紧。
+const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
+// 保留 UTF-8 BOM 给 JSON 解析器检查，不通过替换非法字节悄悄修复正文。
+const REQUEST_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const trace = require('./trace.cjs');
 const config = require('./config.cjs');
 const { rewriteRequest } = require('./rewrite.cjs');
@@ -15,12 +20,13 @@ const { normalizeHeaders } = require('./headers.cjs');
 const { normalizeOrphanToolOutputs } = require('./compat-input.cjs');
 const repairArgs = require('./repair-args.cjs');
 const catalog = require('./catalog.cjs');
+const { redactValue } = require('./redact.cjs');
 
 // 中文注释：启动时间，用于健康检查展示运行时长
 const startedAt = Date.now();
 
 // 中文注释：进程级统计
-const stats = { requests: 0, rewritten: 0, stripped: 0, projected: 0, orphanOutputs: 0, argsRepaired: 0, rejected: 0, errors: 0 };
+const stats = { requests: 0, rewritten: 0, stripped: 0, projected: 0, orphanOutputs: 0, argsRepaired: 0, rejected: 0, errors: 0, filteredOutputIncludes: 0, decodedBodies: 0, compactionSummariesProjected: 0 };
 
 // 中文注释：从运行目录推导实例名（instances/<name>/compat → <name>，否则 main）
 function instanceName(home) {
@@ -32,23 +38,42 @@ function instanceName(home) {
   return 'main';
 }
 
-// 中文注释：按内容编码解压请求体
-function decodeBody(body, encoding) {
-  const value = (encoding || '').toLowerCase();
+// 按声明的编码解压并严格校验 UTF-8，失败仍兼容旧接口的 null 返回值。
+function decodeBody(body, encoding, maxBytes = DEFAULT_MAX_BODY_BYTES, onError) {
+  const value = String(encoding || '').trim().toLowerCase();
   try {
+    let decoded = body;
     if (value === 'zstd') {
-      return Buffer.from(fzstd.decompress(body)).toString('utf8');
+      // fzstd 当前接口先分配解压结果；此处保证超限结果不转发，不宣称消除全部预分配风险。
+      decoded = fzstd.decompress(body);
+    } else if (value === 'gzip') {
+      decoded = zlib.gunzipSync(body, { maxOutputLength: maxBytes });
+    } else if (value === 'deflate') {
+      decoded = zlib.inflateSync(body, { maxOutputLength: maxBytes });
+    } else if (value && value !== 'identity') {
+      throw new Error('不支持的请求压缩编码');
     }
-    if (value === 'gzip') {
-      return zlib.gunzipSync(body).toString('utf8');
+    if (decoded.length > maxBytes) {
+      const err = new RangeError('解压后的请求正文超限');
+      err.code = 'ERR_BUFFER_TOO_LARGE';
+      throw err;
     }
-    if (value === 'deflate') {
-      return zlib.inflateSync(body).toString('utf8');
-    }
-    return body.toString('utf8');
+    return REQUEST_DECODER.decode(decoded);
   } catch (err) {
+    if (typeof onError === 'function') {
+      onError(err);
+    } else {
+      console.error('[codex-compat] 请求正文解码失败', err);
+    }
     return null;
   }
+}
+
+// 本地错误只返回固定说明，不把 JSON 解析器中的正文片段或认证信息回显。
+function respondError(res, status, code, message) {
+  const payload = JSON.stringify({ error: { message, type: 'invalid_request_error', code } });
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+  res.end(payload);
 }
 
 // 中文注释：创建事件日志写入器，达到上限自动滚动
@@ -68,23 +93,31 @@ function createEventLog(logDir, maxBytes) {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       currentPath = path.join(logDir, 'compat-' + stamp + '.jsonl');
       stream = fs.createWriteStream(currentPath, { flags: 'a' });
+      stream.on('error', (err) => console.error('[codex-compat] 事件日志写入失败', err));
       bytes = 0;
     } catch (err) {
+      console.error('[codex-compat] 事件日志打开失败', err);
       stream = null;
     }
   }
   return {
-    write(obj) {
+    // 异常对象传入日志 API，但只序列化安全的类型和错误码，禁止落正文片段或密文。
+    write(obj, error) {
       try {
+        if (error) {
+          obj = Object.assign({}, obj, { level: 'error', error: { name: error.name || 'Error', code: error.code === undefined ? null : error.code } });
+        }
         roll();
         if (!stream) {
           return;
         }
-        const line = JSON.stringify(obj) + '\n';
+        // 模型名、工具名等元数据也可能误带凭据，落盘前再做统一兜底。
+        const line = JSON.stringify(redactValue(obj)) + '\n';
         bytes += Buffer.byteLength(line);
         stream.write(line);
       } catch (err) {
-        // 中文注释：日志失败不能影响转发主链路
+        // 日志失败不能阻断转发，但必须保留真实异常用于排查日志设施。
+        console.error('[codex-compat] 事件日志记录失败', err);
       }
     },
     path: () => currentPath,
@@ -95,7 +128,7 @@ function createEventLog(logDir, maxBytes) {
           stream = null;
         }
       } catch (err) {
-        // 中文注释：关闭失败忽略
+        console.error('[codex-compat] 事件日志关闭失败', err);
       }
     },
   };
@@ -106,7 +139,8 @@ function createCompatServer(options = {}) {
   const base = options.cfg || config.loadSafe(options.configInput).cfg;
   const cfg = Object.assign({}, base, options.overrides || {});
   const log = createEventLog(options.logDir || config.paths(cfg.home).logs, cfg.runtime.logMaxBytes || 16 * 1024 * 1024);
-  const maxBodyBytes = cfg.runtime.maxBodyBytes || 64 * 1024 * 1024;
+  // 接收正文与解压结果必须使用同一限额。
+  const maxBodyBytes = cfg.runtime.maxBodyBytes || DEFAULT_MAX_BODY_BYTES;
 
   const server = http.createServer((req, res) => {
     // 中文注释：健康检查端点，同时作为端口身份签名
@@ -152,16 +186,23 @@ function createCompatServer(options = {}) {
     let received = 0;
     let aborted = false;
     req.on('data', (chunk) => {
+      if (aborted) {
+        return;
+      }
       received += chunk.length;
       if (received > maxBodyBytes) {
         aborted = true;
+        stats.requests++;
+        stats.rejected++;
+        stats.errors++;
+        log.write({ ts: new Date().toISOString(), event: 'body_too_large', bytes: received }, new RangeError('接收的请求正文超限'));
+        // 丢弃后续字节但不立即销毁响应 socket，确保客户端真正收到 413。
         try {
-          res.writeHead(413, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ error: { message: 'codex-compat: request body too large' } }));
+          respondError(res, 413, 'body_too_large', 'codex-compat: request body too large');
         } catch (err) {
-          // 中文注释：客户端可能已断开，忽略
+          log.write({ ts: new Date().toISOString(), event: 'response_error' }, err);
         }
-        req.destroy();
+        req.resume();
         return;
       }
       chunks.push(chunk);
@@ -176,67 +217,100 @@ function createCompatServer(options = {}) {
       let out = body;
       let reject = null;
 
-      if (req.method === 'POST' && /responses/.test(req.url || '')) {
-        const text = decodeBody(body, req.headers['content-encoding']);
+      const pathname = String(req.url || '').split('?')[0];
+      if (req.method === 'POST' && /\/responses(?:\/compact)?\/?$/.test(pathname)) {
+        const encoding = String(req.headers['content-encoding'] || '').trim().toLowerCase();
+        let decodeError = null;
+        const text = decodeBody(body, encoding, maxBodyBytes, (err) => {
+          decodeError = err;
+          // 仅记录已知编码名和异常类型，不落请求头中的任意字符串或解码正文。
+          log.write({ ts: new Date().toISOString(), event: 'decode_error', encoding: ['gzip', 'deflate', 'zstd', 'identity', ''].includes(encoding) ? encoding : 'unsupported' }, err);
+        });
         if (text === null) {
           stats.errors++;
-          log.write({ ts: new Date().toISOString(), event: 'decode_error', encoding: req.headers['content-encoding'] || null });
-        } else {
-          let parsed = null;
-          try {
-            parsed = JSON.parse(text);
-            trace.traceRequest(parsed, req.url);
-          } catch (err) {
-            stats.errors++;
-            log.write({ ts: new Date().toISOString(), event: 'parse_error', bytes: body.length });
+          stats.rejected++;
+          const oversized = decodeError && decodeError.code === 'ERR_BUFFER_TOO_LARGE';
+          respondError(res, oversized ? 413 : 400, oversized ? 'body_too_large' : 'decode_error', 'codex-compat: request decoding failed');
+          return;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new TypeError('Responses 请求根节点必须是对象');
           }
-          if (parsed) {
-            const result = rewriteRequest(parsed, {
-              stripAlways: cfg.compat.stripAlways,
-              thirdPartyPrefixes: cfg.compat.thirdPartyPrefixes,
+        } catch (err) {
+          stats.errors++;
+          stats.rejected++;
+          // SyntaxError.message 可能带原始正文，异常只交给元数据日志 API。
+          log.write({ ts: new Date().toISOString(), event: 'parse_error', bytes: body.length }, err);
+          respondError(res, 400, 'parse_error', 'codex-compat: invalid JSON request object');
+          return;
+        }
+        try {
+          trace.traceRequest(parsed, req.url);
+          const result = rewriteRequest(parsed, Object.assign({}, cfg.compat, {
+            upstream: cfg.upstream,
+            // 摘要解析异常也不得带上摘要正文或封装内容。
+            onNormalizationError: (err) => log.write({ ts: new Date().toISOString(), event: 'compaction_error' }, err),
+          }));
+          reject = result.reject;
+          if (!reject && result.policy.normalizeOrphanOutputs) {
+            result.stat.orphanOutputs = normalizeOrphanToolOutputs(parsed);
+          }
+          // 非法工具参数仍在原有窄范围内修复，不再把裸词写进日志。
+          result.stat.argsRepaired = reject ? [] : repairArgs.repairInputArguments(parsed);
+          const changed = result.stat.stripped.length || result.stat.projected || result.stat.orphanOutputs || result.stat.argsRepaired.length || result.stat.filteredIncludes.length || result.stat.compactionSummariesProjected;
+          const decoded = !!encoding && encoding !== 'identity' && (changed || result.policy.decodeRequest);
+          if (changed) {
+            stats.rewritten++;
+            out = Buffer.from(JSON.stringify(parsed), 'utf8');
+          } else if (decoded) {
+            // 无语义变化时保留原 JSON 文本，只改变 HTTP 的压缩表示。
+            out = Buffer.from(text, 'utf8');
+          }
+          stats.stripped += result.stat.stripped.length;
+          stats.projected += result.stat.projected;
+          stats.orphanOutputs += result.stat.orphanOutputs;
+          stats.argsRepaired += result.stat.argsRepaired.length;
+          stats.filteredOutputIncludes += result.stat.filteredIncludes.length;
+          stats.compactionSummariesProjected += result.stat.compactionSummariesProjected;
+          if (decoded && !reject) {
+            stats.decodedBodies++;
+          }
+          if (result.stat.argsRepaired.length) {
+            log.write({
+              ts: new Date().toISOString(),
+              event: 'args_repaired',
+              model: parsed.model,
+              tools: result.stat.argsRepaired.map(item => item.name),
+              count: result.stat.argsRepaired.length,
             });
-            if (result.third) {
-              result.stat.orphanOutputs = normalizeOrphanToolOutputs(parsed);
-            }
-            // 中文注释：非法工具参数（值位置上的裸词，如 fork_turns: none）会让网关 400 掉整个请求，
-            // 而 Codex 已把坏条目写进会话历史并每轮重放 —— 这里窄范围修复，避免会话被一次手滑打死。
-            result.stat.argsRepaired = repairArgs.repairInputArguments(parsed);
-            reject = result.reject;
-            const changed = result.stat.stripped.length || result.stat.projected || result.stat.orphanOutputs || result.stat.argsRepaired.length;
-            if (changed) {
-              stats.rewritten++;
-            }
-            stats.stripped += result.stat.stripped.length;
-            stats.projected += result.stat.projected;
-            stats.orphanOutputs += result.stat.orphanOutputs;
-            stats.argsRepaired += result.stat.argsRepaired.length;
-            if (result.stat.argsRepaired.length) {
-              // 中文注释：只记工具名与被修的裸词，不记参数正文
-              log.write({
-                ts: new Date().toISOString(),
-                event: 'args_repaired',
-                model: parsed.model,
-                tools: result.stat.argsRepaired.map(item => item.name),
-                tokens: [...new Set(result.stat.argsRepaired.flatMap(item => item.tokens))],
-              });
-            }
-            if (changed || result.stat.opaque || reject) {
-              log.write({
-                ts: new Date().toISOString(),
-                event: 'rewrite',
-                model: parsed.model,
-                kind: result.official ? 'official' : (result.third ? 'thirdparty' : 'other'),
-                stripped: result.stat.stripped,
-                projected: result.stat.projected,
-                opaque: result.stat.opaque,
-                orphanOutputs: result.stat.orphanOutputs,
-                argsRepaired: result.stat.argsRepaired.length,
-              });
-            }
-            if (changed) {
-              out = Buffer.from(JSON.stringify(parsed), 'utf8');
-            }
           }
+          if (changed || decoded || result.stat.opaque || reject) {
+            log.write({
+              ts: new Date().toISOString(),
+              event: 'rewrite',
+              model: parsed.model,
+              kind: result.official ? 'official' : (result.third ? 'thirdparty' : 'other'),
+              routeKind: result.policy.routeKind,
+              stripped: result.stat.stripped,
+              projected: result.stat.projected,
+              opaque: result.stat.opaque,
+              orphanOutputs: result.stat.orphanOutputs,
+              argsRepaired: result.stat.argsRepaired.length,
+              filteredOutputIncludes: result.stat.filteredIncludes.length,
+              compactionSummariesProjected: result.stat.compactionSummariesProjected,
+              decoded: !!decoded && !reject,
+              rejected: !!reject,
+            });
+          }
+        } catch (err) {
+          stats.errors++;
+          stats.rejected++;
+          log.write({ ts: new Date().toISOString(), event: 'rewrite_error' }, err);
+          respondError(res, 500, 'rewrite_error', 'codex-compat: request rewriting failed');
+          return;
         }
       }
 
@@ -286,12 +360,15 @@ function createCompatServer(options = {}) {
           return;
         }
         stats.errors++;
-        log.write({ ts: new Date().toISOString(), event: 'upstream_error', message: String(err) });
+        log.write({ ts: new Date().toISOString(), event: 'upstream_error' }, err);
         try {
-          res.writeHead(502, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ error: { message: 'codex-compat: upstream unreachable', detail: String(err) } }));
+          if (res.headersSent) {
+            res.destroy();
+          } else {
+            respondError(res, 502, 'upstream_error', 'codex-compat: upstream unreachable');
+          }
         } catch (e) {
-          // 中文注释：响应头可能已发出，忽略
+          log.write({ ts: new Date().toISOString(), event: 'response_error' }, e);
         }
       });
 
@@ -320,16 +397,16 @@ function main() {
   }
   const server = createCompatServer({ cfg });
   server.on('error', (err) => {
-    server.compatLog.write({ ts: new Date().toISOString(), event: 'listen_error', message: String(err) });
-    console.error('[codex-compat] 监听失败：' + err.message);
+    server.compatLog.write({ ts: new Date().toISOString(), event: 'listen_error' }, err);
+    console.error('[codex-compat] 监听失败', { name: err.name, code: err.code });
     process.exit(1);
   });
   process.on('uncaughtException', (err) => {
-    server.compatLog.write({ ts: new Date().toISOString(), event: 'uncaught', message: String(err && err.stack || err) });
+    server.compatLog.write({ ts: new Date().toISOString(), event: 'uncaught' }, err);
     process.exit(1);
   });
   process.on('unhandledRejection', (err) => {
-    server.compatLog.write({ ts: new Date().toISOString(), event: 'unhandled_rejection', message: String(err) });
+    server.compatLog.write({ ts: new Date().toISOString(), event: 'unhandled_rejection' }, err instanceof Error ? err : new Error('未处理的 Promise 拒绝'));
   });
   server.listen(cfg.listen.port, cfg.listen.host, () => {
     server.compatLog.write({

@@ -33,7 +33,11 @@ function setPath(object, keys, value) {
 }
 
 // 中文注释：字面量转换
-function coerce(value) {
+function coerce(value, key) {
+  // 仅已声明的兼容名单支持 JSON 数组，避免把任意配置字符串隐式改成对象。
+  if ((key === 'compat.opaqueTaskModels' || key === 'compat.thirdPartyPrefixes') && typeof value === 'string') {
+    return JSON.parse(value);
+  }
   if (value === 'true') {
     return true;
   }
@@ -69,9 +73,13 @@ async function configCommand(opts = {}) {
       return { ok: false, code: 'usage', message: '用法：codex-compat config set <key> <value>' };
     }
     const keys = splitKey(key);
-    setPath(cfg, keys, coerce(opts._[3]));
+    setPath(cfg, keys, coerce(opts._[3], key));
     config.save(cfg, home);
     const lines = ['已更新 ' + key + ' = ' + JSON.stringify(getPath(cfg, keys))];
+    // 代理兼容策略不管理 Codex 模型目录或角色配置，保存后不得触发无关映射写入。
+    if (keys[0] === 'compat') {
+      return { ok: true, code: 'config', lines, config: cfg };
+    }
 
     // 中文注释：DeepSeek 开关需同步到用户级映射文件并重新应用
     const mappingFile = config.paths(home).mappingFile;

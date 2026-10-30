@@ -38,7 +38,8 @@ function scanLogs(logDir) {
   for (const line of lines) {
     try {
       const event = JSON.parse(line);
-      if (badEvents.includes(event.event)) {
+      // 新兼容错误按级别识别，旧事件名仍保持兼容，避免新增错误被误报为日志正常。
+      if (event.level === 'error' || badEvents.includes(event.event) || (event.event === 'rewrite' && event.rejected === true)) {
         bad++;
       }
     } catch (err) {

@@ -14,7 +14,7 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 
 ## 已验证基线
 
-本工具公开声明的实机结论集中在一组基线上：**Codex CLI 0.160.1**（Windows 实机验证——主实例跨 provider 派发、lab 实例 `codex exec`、提示词逐字符送达），运行时要求 Node.js ≥ 18。macOS 与 Linux 目前只有 CI 覆盖，没有实机验证。
+历史安装与提示词基线仍为 **Codex CLI 0.160.1**，`doctor` 继续显示该兼容回退基线。2026-10-30 新增 Windows + Node 22.14.0 + **Codex CLI 0.163.0-alpha.10.2** 的隔离兼容验收：覆盖三类模型九种父子组合、多轮/工具、压缩后工具与孩子、同孩子续聊及明确名单下的不透明委托，不将这些结论扩展成全部版本或平台的承诺。运行时仍要求 Node.js ≥ 18；macOS 与 Linux 没有本次实机验收。
 
 升级 Codex 后如遇异常，回退顺序是：`codex-compat bypass` 先把 `base_url` 指回原上游恢复流量 → `npm i -g @openai/codex@0.160.1` 回退 CLI → `codex-compat doctor` 复检，`codex-version` 行会显示当前版本与基线 0.160.1 的对照（该行跟随菜单语言，只作展示、不判失败）。
 
@@ -38,7 +38,7 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 | Node.js 18 / 20 / 22 | 已验证 | 三个主版本均在 CI 的完整测试矩阵中运行 |
 | Node.js 22 及以上 | 支持（可选增强） | 只有该版本能用内置 SQLite 只读探测 CC Switch 的本地数据库；低版本自动降级到其余探测来源，不影响功能 |
 | 压缩编码 | 支持 | 请求体支持 `zstd`、`gzip`、`deflate` 解码（Codex 使用 `zstd`）；改写后会移除失效的 `content-encoding` 并重算 `content-length` |
-| 请求体大小 | 支持 | 单请求上限 64MB，超出返回 413 |
+| 请求体大小 | 支持 | 接收正文与解压结果分别受 64MB 限额约束，超出返回 413；gzip/deflate 使用解压分配限额，fzstd 当前接口仍存在结果检查前的预分配风险 |
 
 ## Codex
 
@@ -116,7 +116,7 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 
 ## 跨 provider 派发矩阵
 
-在 Windows 实机回归中验证的五种主控 × 子代理组合：
+以下为旧版本 Windows 基线的五种历史组合，不代表当前 `stripAlways=true` 的触发范围；当前默认所有父模型都执行阶段 A，近期三类模型矩阵按下节的严格孩子证据重新验收：
 
 | 主控 | 子代理 | 阶段 A | 阶段 B | 结果 |
 | --- | --- | --- | --- | --- |
@@ -126,14 +126,38 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 | 网关模型 | 网关模型 | 不触发 | 触发 | 通过 |
 | 网关模型 | `auto(free)` | 不触发 | 触发 | 通过 |
 
-配套的输入归一化（孤立 `function_call_output` 改写为普通 user 消息）只在网关下游生效；官方下游容忍这类孤立输出，因此保持原样透传。
+当前输入归一化按实际路由生效：所有外部路由（包括自定义上游的同名 GPT）处理孤立工具输出；已知官方通道保持原样，配对正常的工具输出不受影响。
+
+## 新兼容边界与证据口径
+
+- 自动路由策略不把自定义上游的 `gpt-*` 名称当作官方能力证明；外部路由仅过滤输出回放选择器，不清理历史密文。
+- 默认所有父模型剥离已知协作加密标记；不透明任务只有已知官方通道或显式精确模型名单可透传，不能推断不同后端密文互解。
+- CC Switch 摘要仅在绕过 CC Switch 时严格还原为普通 user 消息；原生密文不解密，未知或损坏封装不静默丢上下文。
+- `npm run test:compat-proxy` 是本机真实 HTTP 边界测试，覆盖压缩、实际转发、拒绝时零上游请求、统计和 SSE；不是商业模型解密证明。
+- 在线 `npm run test:regression` 要求显式 `CODEX_BIN`，可用 `CODEX_TEST_BASE_URL`、`CODEX_TEST_AUTH_FILE` 和 `CODEX_TEST_CATALOG` 指定本机代理、已有身份及目录。每例使用新临时 home/workspace、只读沙箱、禁止自动批准和强制 output replay，最后清理身份副本与临时会话。
+- 九种父子组合的成功条件来自孩子自己的来源、模型、回答、完成记录及父代理的真实派发/成功等待回参。只有 HTTP 200、父 stdout 口令或未完成的等待不能算通过。
+- 原生输出密文签发、精确回放收益、设备签发及跨后端历史密文迁移仍不作为本工具承诺。
+
+### 2026-10-30 本次真实验收
+
+| 父模型 / 子模型 | 官方 GPT | 第三方 GPT | DeepSeek Flash |
+| --- | --- | --- | --- |
+| 官方 GPT | 通过 | 通过 | 通过 |
+| 第三方 GPT | 通过 | 通过 | 通过 |
+| DeepSeek Flash | 通过 | 通过 | 通过（独立复核） |
+
+模型分别为 `gpt-6.1-sol`、`ccs-deepseek/gpt-6.1-sol` 与 `ccs-deepseek/deepseek-v4.1-flash`。首轮 Flash→Flash 的孩子回答正确，但缺少成功等待证据，未计为通过；保留原失败记录后独立复核，实际 `wait_agent` 回参 `timed_out=false`，才确认该组合通过。这同时说明不能把 CLI 退出 0 或父代理复述口令当作成功。
+
+三类模型均完成多轮事实恢复、真实动态工具和压缩后的独立孩子。Flash 与第三方 GPT 的同一孩子续聊分别从 83 得到 90；第三方 GPT 精确名单测试观察到 3 次真实不透明委托。GPT 与 Flash 由 CC Switch 实际生成的摘要，在直连网关前由本工具还原后均恢复正确 nonce、订单顺序和总和。以上不证明原生密文跨后端可迁移。
+
+主端口生效后，官方→第三方 GPT 与第三方 GPT 自调用首次通过；Flash 自调用首次未匹配孩子预期回答，严格判失败，独立复核时孩子实际回复 83 且成功等待。原失败记录保留，未改写生产逻辑或放宽断言。随后有限追加三次新口令、隔离会话的 Flash 自调用，孩子实际回答和成功等待均通过，未复现失败；同时补充派发口令命中和任务指纹诊断。最初的原始会话已清理，现有记录不足以还原两次首次失败的完整原因，不能据追加通过宣称偶发问题已修复，也不保证每一轮模型输出或编排行为都必然稳定。
 
 ## 如何自行确认当前环境
 
 1. `codex-compat status`：看是否已安装、是否在运行、监听地址与上游，以及 CC Switch 是否处于接管模式。
 2. `codex-compat doctor`：逐项检查端口、上游可达性、配置项、服务注册与 Multi-Agent V2 开关，并给出修复建议。它默认只读；确认后可用 `codex-compat doctor --fix` 自动重跑安装流程修复配置类问题。
 3. `codex-compat logs`：一次成功的跨 provider 派发应当产生带非零计数的 `rewrite` 事件；如果计数长期为零，说明请求没有经过兼容层，或请求形态已经变化。
-4. 离线自检：`codex-compat selftest` 不访问网络、不调用模型，用来确认改写规则本身仍然按预期工作。
+4. `codex-compat selftest` 包含离线改写用例及运行态探测：会访问健康端点、检查上游端口并执行映射预演，但不调用模型。纯离线改写检查是 `rewriteChecks()`，不能把网络探测也称为离线。
 5. 端到端验证：`npm test` 跑离线套件；`npm run test:smoke` 与 `npm run test:live` 是可选的真机在线检查，会消耗真实额度，不要放进 CI。
 
 ## 未验证项

@@ -21,7 +21,7 @@
 
 ## 它解决什么问题
 
-Codex Multi-Agent V2 会把子代理的**任务正文**装进 `encrypted_content` 容器。同 provider 内部一切正常，一旦任务跨 provider，问题就出现了：
+Codex Multi-Agent V2 会使用 `encrypted_content` 委托容器；部分跨后端组合会出现以下故障，但不能据此断言所有第三方都不支持原生委托：
 
 | 现象 | 根因 |
 | --- | --- |
@@ -29,7 +29,7 @@ Codex Multi-Agent V2 会把子代理的**任务正文**装进 `encrypted_content
 | 官方子代理断流：`Encrypted function output content could not be decrypted or decoded.` | 容器里装的是明文，官方后端却一定要解密 |
 | 上游返回 HTTP 400：`Messages with role 'tool' must be a response to a preceding message with 'tool_calls'` | 委派创建的新会话以孤立的 `function_call_output`（委派块）开头，没有配对的 `function_call`；官方下游容忍，按 Chat 协议校验的网关会整单拒绝 |
 
-容器名与内容是否真的加密**没有强绑定**：官方后端看到 `encrypted: true` 标记就加密，网关忽略这个标记、直接产出明文。两种结果都装进同一个 `encrypted_content` 容器，这正是这一整类故障的总根源。
+容器名不证明内容已经加密。历史故障中，部分网关忽略协作 schema 的加密标记并返回明文；另有同网关 GPT 支持自身的原生加密委托。不能把“第三方”或 `gpt-*` 名称直接等同于解密能力，更不能推断不同后端的密文互通。
 
 ## 工作原理
 
@@ -49,15 +49,15 @@ codex-compat  （监听 127.0.0.1:15731，按条件转发 + 改写）
    └── 网关模型  ->  第三方 OpenAI 兼容网关
 ```
 
-兼容层是**透明转发 + 少量条件改写**：不持有任何凭据，不做路由决策，所有 header 原样透传。
+兼容层不接管上游路由或认证，认证头在内存中透传。HTTP 转发会执行既有 Host/hop-by-hop 规范化，并在正文表示改变时重算长度、移除失效压缩声明，不能把它描述为所有 header 字节不变。
 
 ### 三个阶段
 
 | 阶段 | 作用范围 | 做的事 |
 | --- | --- | --- |
-| **阶段 A：剥离加密标记** | 官方主控且请求中引用了第三方模型（`compat.stripAlways` 为 true 时对所有官方主控请求生效，默认即如此） | 删除协作工具（`spawn_agent`、`send_message`、`followup_task`）`message` 字段上的 `encrypted: true` 标记，让官方后端返回明文参数而不是密文 |
+| **阶段 A：剥离加密标记** | 默认覆盖所有父模型；关闭 `stripAlways` 时保留历史混用检测 | 仅删除三个已知协作工具的 `message.encrypted` 标记，从源头请求明文委托，不修改普通工具或正文 |
 | **阶段 B：投影明文容器** | 所有请求 | 把明文从 `encrypted_content` 容器搬进标准 `role: "user"` 消息。两类下游都需要：官方后端不能看到「待在需要解密的容器里的明文」，网关则完全不认识这个容器块类型 |
-| **阶段 C：密文投递守卫** | 下游为第三方模型的请求 | 如果真密文（Fernet 形态，`gAAAAAB…` 前缀）将要投递给第三方子代理，显式返回 HTTP 400（`compat_layer_reject`），绝不静默投递空任务 |
+| **阶段 C：密文投递守卫** | 当前路由未允许不透明任务的请求 | 保留原载荷并明确返回 HTTP 400；已知官方通道或显式精确名单可透传，但兼容层不解密，也不保证跨后端密文互通 |
 
 ### 一项输入归一化
 
@@ -67,7 +67,7 @@ codex-compat  （监听 127.0.0.1:15731，按条件转发 + 改写）
 
 工具调用的 `arguments` 必须是合法 JSON，而网关模型偶尔会把枚举值写成裸词。2026-10-14 与 2026-10-16 各出现一次 `"fork_turns": none`：Codex 本地解析失败却仍把原始字符串写进会话历史，之后每一轮请求都重放它，于是网关以 `HTTP 400 … input[572].arguments … invalid character 'o' in literal null (expecting 'u')` 拒掉整个请求，重试永远无法恢复该会话。第二次发生时模型模板里的加固（三份拷贝均已核对一致）已经在生效，说明加固能降低概率但不能清零。
 
-因此兼容层在转发前把「值位置上的裸词」补成字符串。只处理值位置：扫描时跟踪字符串状态，消息正文里出现同样文字绝不改动。修完必须能通过 JSON.parse 才采用，否则原样转发 —— 绝不发出半成品请求。每次修复记一条 `args_repaired` 事件，只带工具名与那个裸词（不记参数正文），并在健康端点累加 `argsRepaired`。
+因此兼容层在转发前把「值位置上的裸词」补成字符串。只处理值位置：扫描时跟踪字符串状态，消息正文里出现同样文字绝不改动。修完必须能通过 JSON.parse 才采用，否则原样转发 —— 绝不发出半成品请求。每次修复记录 `args_repaired` 事件与工具名、数量，不记录裸词或参数正文；健康端点累加 `argsRepaired`。
 
 ### 前置条件
 
@@ -227,7 +227,7 @@ codex-compat status
   "version": 1,
   "listen": { "host": "127.0.0.1", "port": 15731 },
   "upstream": { "mode": "cc-switch", "host": "127.0.0.1", "port": 15721, "baseUrl": null, "basePath": "/v1" },
-  "compat": { "stripAlways": true, "thirdPartyPrefixes": ["ccs-", "ccs/"], "detection": "auto" },
+  "compat": { "stripAlways": true, "thirdPartyPrefixes": ["ccs-", "ccs/"], "detection": "auto", "outputTokenReplay": "auto", "requestCompression": "auto", "opaqueTaskModels": [] },
   "features": { "deepseekPrompt": true, "deepseekRoles": true, "providerCatalog": false, "officialGuard": true },
   "service": { "autoStart": true, "guard": true, "reclaim": "auto" },
   "runtime": { "logLevel": "info", "trace": false, "lang": "auto", "verbose": false }
@@ -238,7 +238,10 @@ codex-compat status
 | --- | --- |
 | `listen` | 监听地址，默认只监听回环地址 |
 | `upstream` | 改写后转发的上游：用 `host`/`port`，或用 `baseUrl` 指向自定义端点；`basePath`（默认 `/v1`）是拼接 Codex 指向地址时使用的路径前缀 |
-| `compat.stripAlways` | 为 `true` 时对所有官方主控请求剥离加密标记；为 `false` 时收窄为「请求中引用了第三方模型」的请求 |
+| `compat.stripAlways` | 为 `true` 时对所有父模型剥离已知协作工具的加密标记；为 `false` 时保留历史的官方父请求混用检测 |
+| `compat.outputTokenReplay` | `auto / strip / preserve`；自动模式只在已知官方通道保留输出回放选择器，对外部路由仅过滤 `output.encrypted_content`，不删除历史密文 |
+| `compat.requestCompression` | `auto / decode / preserve`；外部路由自动解压，正文已改写时 `preserve` 也不能保留旧编码声明 |
+| `compat.opaqueTaskModels` | 默认 `[]`；仅给已验证上游列出精确模型名称，不支持通配符，也不证明历史密文来源兼容 |
 | `compat.thirdPartyPrefixes` | 判定为第三方的模型 ID 前缀（默认 `ccs-`、`ccs/`）。自建网关的前缀请在此补充 |
 | `compat.detection` | 第三方判定模式（`auto`，或显式列表） |
 | `features.deepseekPrompt` | 是否持续同步融合版 DeepSeek 提示词模板 |
@@ -253,6 +256,14 @@ codex-compat status
 | `runtime.trace` | 诊断追踪标记，默认关闭；只有为排障显式打开追踪时才会产生追踪输出（详见 [PRIVACY.md](PRIVACY.md)） |
 | `runtime.lang` | 菜单语言：`auto`（安装时自动探测一次）、`zh` 或 `en`；也可用 `CODEX_COMPAT_LANG` 临时覆盖 |
 | `runtime.verbose` | `--verbose` 的持久默认值（默认 `false`）；`--no-verbose` 可对单次运行临时关闭 |
+
+### 输出回放、摘要与配置边界
+
+`output.encrypted_content` 是额外输出回放选择器，不是 `reasoning.encrypted_content`，也不是历史密文。自动策略只过滤前者；其他选择器、历史输出/推理/原生压缩密文和上游响应均保留。过滤不承诺保留原始输出 token 的精确回放收益，也不证明设备签发或跨后端密文可用。
+
+外部路由默认解压 `zstd / gzip / deflate`；解压、UTF-8 或 JSON 根节点检查失败在本地返回 400，超限返回 413，不转发坏字节。经 CC Switch 的摘要保留；绕过它时仅严格还原 `ccswitch-compaction-v1:` 文本为普通 user 消息，损坏或未知版本拒绝。这不恢复原始 token、缓存或全部工具状态。
+
+`compat.opaqueTaskModels` 和 `compat.thirdPartyPrefixes` 的配置 CLI 支持 JSON 字符串数组，例如 `codex-compat config set compat.opaqueTaskModels '["vendor/verified-model"]'`。名单只应包含已验证的精确模型。修改 `compat.*` 只保存兼容配置，不再同步模型目录；运行中的兼容进程仍需重新加载配置才会生效。`COMPAT_OUTPUT_TOKEN_REPLAY` 与 `COMPAT_REQUEST_COMPRESSION` 可临时覆盖文件中的对应策略。
 
 也可以用命令行按点号键读写这些配置：
 

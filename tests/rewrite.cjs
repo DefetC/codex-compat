@@ -147,15 +147,15 @@ const untouched = rewriteRequest(plainOfficial, { stripAlways: false });
 assert.deepEqual(untouched.stat.stripped, []);
 assert.equal(plainOfficial.tools[0].parameters.properties.message.encrypted, true);
 
-// 中文注释：断言 8 —— 第三方请求不做阶段 A（父请求由官方侧改写）
+// 默认明文化必须覆盖第三方父请求，否则它仍会生成跨路由无法交付的委托。
 const thirdPartyParent = {
   model: 'ccs-deepseek/auto(free)',
   input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '执行' }] }],
   tools: [spawnAgentTool()],
 };
 const thirdPartyParentResult = rewriteRequest(thirdPartyParent, { stripAlways: true });
-assert.deepEqual(thirdPartyParentResult.stat.stripped, []);
-assert.equal(thirdPartyParent.tools[0].parameters.properties.message.encrypted, true);
+assert.deepEqual(thirdPartyParentResult.stat.stripped, ['spawn_agent']);
+assert.equal(Object.prototype.hasOwnProperty.call(thirdPartyParent.tools[0].parameters.properties.message, 'encrypted'), false);
 assert.equal(thirdPartyParentResult.reject, null);
 
 console.log('REWRITE_TEST_PASS');

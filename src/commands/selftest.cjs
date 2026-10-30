@@ -36,7 +36,7 @@ function rewriteChecks() {
   results.push({ name: 'strip-official-marker', ok: r1.stat.stripped.length === 1 && official.input[0].tools[0].parameters.properties.message.encrypted === undefined });
   // 明文容器：应投影成 user 消息
   results.push({ name: 'project-plaintext', ok: r1.stat.projected === 1 && r1.reject === null });
-  // 真密文 + 第三方下游：应显式拒绝
+  // 未显式确认的不透明任务默认拒绝，不以第三方名称推断实际解密能力。
   const third = collabRequest('ccs-deepseek/deepseek-v4.1-flash', 'gAAAAAB-opaque');
   const r2 = rewrite.rewriteRequest(third, { stripAlways: true });
   results.push({ name: 'reject-opaque-third-party', ok: r2.third === true && !!r2.reject });
@@ -44,6 +44,16 @@ function rewriteChecks() {
   const officialOpaque = collabRequest('gpt-6', 'gAAAAAB-opaque');
   const r3 = rewrite.rewriteRequest(officialOpaque, { stripAlways: true });
   results.push({ name: 'allow-opaque-official', ok: r3.reject === null && r3.stat.opaque === 1 });
+  // 第三方父请求同样必须明文化，且只移除输出回放选择器。
+  const thirdParent = collabRequest('ccs-deepseek/gpt-6.1-sol', '明文任务');
+  thirdParent.include = ['reasoning.encrypted_content', 'output.encrypted_content'];
+  const r4 = rewrite.rewriteRequest(thirdParent, { stripAlways: true });
+  results.push({ name: 'strip-third-parent-marker', ok: r4.stat.stripped.length === 1 && r4.stat.projected === 1 });
+  results.push({ name: 'filter-output-replay', ok: r4.stat.filteredIncludes.length === 1 && JSON.stringify(thirdParent.include) === JSON.stringify(['reasoning.encrypted_content']) });
+  // 合成载荷只验证显式名单透传，不证明服务能解密或历史来源一致。
+  const configured = collabRequest('ccs-vendor/gpt-model', 'gAAAAAB-opaque');
+  const r5 = rewrite.rewriteRequest(configured, { opaqueTaskModels: ['ccs-vendor/gpt-model'] });
+  results.push({ name: 'allow-configured-opaque', ok: r5.reject === null && r5.stat.opaque === 1 && configured.input[1].content[1].encrypted_content === 'gAAAAAB-opaque' });
   // 孤立工具输出：第三方上游应被归一化
   const orphan = { model: 'ccs-deepseek/deepseek-v4.1-flash', input: [{ type: 'function_call_output', call_id: null, output: '<codex_delegation>hi</codex_delegation>' }] };
   const normalized = normalizeOrphanToolOutputs(orphan);

@@ -5,13 +5,24 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { OUTPUT_REPLAY_POLICIES, REQUEST_COMPRESSION_POLICIES } = require('./compat-policy.cjs');
 
 // 中文注释：可持久化配置的默认值，字段含义见 README
 const DEFAULTS = {
   version: 1,
   listen: { host: '127.0.0.1', port: 15731 },
   upstream: { mode: 'cc-switch', host: '127.0.0.1', port: 15721, baseUrl: null, basePath: '/v1' },
-  compat: { stripAlways: true, thirdPartyPrefixes: ['ccs-', 'ccs/'], detection: 'auto' },
+  compat: {
+    stripAlways: true,
+    thirdPartyPrefixes: ['ccs-', 'ccs/'],
+    detection: 'auto',
+    // 默认仅按已知路由保留输出回放扩展，不删除任何历史密文。
+    outputTokenReplay: OUTPUT_REPLAY_POLICIES.AUTO,
+    // 外部路由默认使用无压缩正文，降低第三方 JSON 解码不兼容风险。
+    requestCompression: REQUEST_COMPRESSION_POLICIES.AUTO,
+    // 非官方不透明任务只给经过验证、显式列出的精确模型透传。
+    opaqueTaskModels: [],
+  },
   features: {
     deepseekPrompt: true,
     deepseekRoles: true,
@@ -104,6 +115,22 @@ function validate(cfg) {
   if (typeof cfg.upstream.basePath !== 'string' || !cfg.upstream.basePath.startsWith('/')) {
     throw new Error('upstream.basePath 必须以 / 开头');
   }
+  if (!cfg.compat || typeof cfg.compat !== 'object' || Array.isArray(cfg.compat)) {
+    throw new Error('compat 必须是对象');
+  }
+  if (cfg.compat.stripAlways !== undefined && typeof cfg.compat.stripAlways !== 'boolean') {
+    throw new Error('compat.stripAlways 必须是布尔值');
+  }
+  // 新字段缺省时兼容旧调用方，显式设置时必须命中约定枚举。
+  if (cfg.compat.outputTokenReplay !== undefined && !Object.values(OUTPUT_REPLAY_POLICIES).includes(cfg.compat.outputTokenReplay)) {
+    throw new Error('compat.outputTokenReplay 只能是 ' + Object.values(OUTPUT_REPLAY_POLICIES).join(' / '));
+  }
+  if (cfg.compat.requestCompression !== undefined && !Object.values(REQUEST_COMPRESSION_POLICIES).includes(cfg.compat.requestCompression)) {
+    throw new Error('compat.requestCompression 只能是 ' + Object.values(REQUEST_COMPRESSION_POLICIES).join(' / '));
+  }
+  if (cfg.compat.opaqueTaskModels !== undefined && (!Array.isArray(cfg.compat.opaqueTaskModels) || cfg.compat.opaqueTaskModels.some(model => typeof model !== 'string' || !model || model.trim() !== model || /[*?]/.test(model)))) {
+    throw new Error('compat.opaqueTaskModels 必须是无通配符的非空模型名称数组');
+  }
   if (!Array.isArray(cfg.compat.thirdPartyPrefixes) || cfg.compat.thirdPartyPrefixes.some(x => typeof x !== 'string')) {
     throw new Error('compat.thirdPartyPrefixes 必须是字符串数组');
   }
@@ -151,6 +178,13 @@ function fromEnv(cfg) {
   if (process.env.COMPAT_STRIP_ALWAYS === '1') {
     next.compat.stripAlways = true;
   }
+  // 显式环境变量覆盖文件中的兼容策略，非法值由统一校验拒绝。
+  if (process.env.COMPAT_OUTPUT_TOKEN_REPLAY !== undefined) {
+    next.compat.outputTokenReplay = process.env.COMPAT_OUTPUT_TOKEN_REPLAY;
+  }
+  if (process.env.COMPAT_REQUEST_COMPRESSION !== undefined) {
+    next.compat.requestCompression = process.env.COMPAT_REQUEST_COMPRESSION;
+  }
   if (process.env.COMPAT_TRACE === '1') {
     next.runtime.trace = true;
   }
@@ -174,6 +208,16 @@ function fromOptions(cfg, input = {}) {
   }
   if (input.upstreamBasePath !== undefined) {
     next.upstream.basePath = String(input.upstreamBasePath);
+  }
+  // 调用参数优先于环境变量；名单仍须通过精确模型校验。
+  if (input.outputTokenReplay !== undefined) {
+    next.compat.outputTokenReplay = input.outputTokenReplay;
+  }
+  if (input.requestCompression !== undefined) {
+    next.compat.requestCompression = input.requestCompression;
+  }
+  if (input.opaqueTaskModels !== undefined) {
+    next.compat.opaqueTaskModels = structuredClone(input.opaqueTaskModels);
   }
   if (input.reclaim !== undefined) {
     next.service.reclaim = String(input.reclaim);

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file. The format follows the spirit of Keep a Changelog, and the project uses semantic-ish versioning while it is pre-1.0.
 
+## [0.1.1] - 待发布
+
+### 跨模型兼容与诊断隐私
+
+- 新增按实际转发目标判定的兼容策略：`outputTokenReplay`、`requestCompression` 和精确的 `opaqueTaskModels`；模型叫 `gpt-*` 不再自动证明自定义上游支持原生扩展。
+- `stripAlways=true` 默认覆盖所有父模型；只过滤顶层 `include` 的 `output.encrypted_content`，保留历史输出密文、推理密文与原生压缩密文。
+- 修复仅选择器变化仍发送旧正文的问题；外部路由自动转发无压缩 UTF-8 请求，改写正文始终移除失效编码声明。无效 JSON、非法 UTF-8、解压失败返回 400，接收正文或解压结果超限返回 413。
+- 经 CC Switch 保留其摘要封装，绕过 CC Switch 时仅严格还原 `ccswitch-compaction-v1:` 文本摘要为普通 user 消息；损坏或未知版本明确拒绝。
+- 兼容配置 CLI 支持 JSON 字符串数组，修改 `compat.*` 不再同步无关模型目录。默认日志只记录计数及安全异常类型，不记录参数修复裸词。
+- 诊断包先结构化脱敏再序列化，覆盖 URL 凭据、Bearer、Fernet 和摘要；损坏 JSONL 行明确省略，仍要求分享前人工检查。
+- 新增真实 HTTP 边界、诊断包和子代理证据负向测试；在线回归要求显式 `CODEX_BIN`、临时 home、独立子会话、正确模型、真实回答、派发与成功等待证据，不能靠父代理复述口令通过。派发诊断保留口令命中及任务指纹，不记录任务正文；首轮失败与独立复核分开保留，不承诺每轮模型编排稳定。
+
 ## [0.1.0] - 2026-10-08
 
 Initial version.

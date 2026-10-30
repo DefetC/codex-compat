@@ -17,8 +17,8 @@ All runtime data stays inside the runtime home (`~/.codex-compat` by default, or
 
 | Data | Location | Contents |
 | --- | --- | --- |
-| Settings | `~/.codex-compat/config.json` | Addresses, feature switches, service and reclaim policy. No credentials |
-| Logs | `~/.codex-compat/logs/` | Event types, counters, model names, timestamps, and error text for failures |
+| Settings | `~/.codex-compat/config.json` | 默认保存地址、开关与策略；用户自行写入 URL 或自定义字段的值可能包含敏感信息，原配置不等同于脱敏诊断副本 |
+| Logs | `~/.codex-compat/logs/` | 事件类型、计数、模型名、时间戳；异常只记录类型和错误码，不记录正文片段、裸词或原始异常消息 |
 | Diagnostic trace | `~/.codex-compat/logs/` | Off by default. See the section below |
 | Backups | `~/.codex-compat/backups/` | Copies of the files taken immediately before a write, so changes can be rolled back |
 | Install manifest | `~/.codex-compat/install-manifest.json` | Which files the installer changed, and content hashes used to detect external edits |
@@ -27,9 +27,9 @@ All runtime data stays inside the runtime home (`~/.codex-compat` by default, or
 
 ## What is never stored
 
-- Credentials: API keys, tokens, cookies, and authentication headers are forwarded in memory and are never written to disk, never logged, and never included in a diagnostic bundle.
+- 转发路径中的 API key、token、cookie 与认证头只在内存中透传，不落默认事件日志；诊断副本按规则脱敏。用户主动保存的原始配置、备份，以及使用 `instance create --key` 生成的实例 `secrets.env` 仍可能含凭据，不能将“转发不记凭据”误解为所有运行文件都可公开。
 - Task bodies and message content: the normal logging path records counts and model names only. It does not record what you asked a subagent to do, and it does not record model output.
-- Ciphertext: the layer never decrypts official ciphertext and does not persist it beyond forwarding the request.
+- 原生密文：不尝试解密、不删除历史输出/推理/原生压缩密文，也不在默认日志中保存。`ccswitch-compaction-v1:` 是 Base64 文本摘要而非原生密文；只有绕过 CC Switch 时才严格还原为普通 user 消息，摘要同样不落默认日志。
 
 ## Logging policy
 
@@ -64,7 +64,7 @@ Before changing a file, the installer stores a copy under `~/.codex-compat/backu
 
 ## Diagnostic bundles
 
-The "generate a diagnostic bundle" menu entry writes a folder under `~/.codex-compat/diagnostics/<timestamp>/` containing the status report, the doctor report, the configuration (without the runtime home field), and the last few log files trimmed to their most recent lines. Before writing, the text passes through a sanitizer that redacts credential-shaped values (for example `authorization`, `api key`, `secret`, `password`, `token`), `sk-…`-style keys, and ciphertext blocks. The bundle is not uploaded anywhere by this tool. Treat it as a starting point rather than a guarantee: review it before attaching it to a report.
+诊断包写入 `~/.codex-compat/diagnostics/<timestamp>/`，包含状态、体检、配置和近期日志，不会自动上传。状态、配置及 JSONL 先按敏感字段结构化遮盖，再序列化；文本兜底完整遮盖 Bearer、密钥、Fernet 和 CC Switch 摘要封装，URL 的 userinfo 与敏感查询参数也会遮盖。无法解析的 JSONL 行明确省略并报告数量，不能把它当作完整记录。脱敏不等于可公开：分享前仍须人工检查路径、内部地址、提示词及任何不在已知规则中的敏感信息。
 
 ## Data removal
 

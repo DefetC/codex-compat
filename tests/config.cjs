@@ -13,6 +13,8 @@ const ENV_KEYS = [
   'COMPAT_UPSTREAM_PORT',
   'COMPAT_UPSTREAM_BASE_URL',
   'COMPAT_STRIP_ALWAYS',
+  'COMPAT_OUTPUT_TOKEN_REPLAY',
+  'COMPAT_REQUEST_COMPRESSION',
   'COMPAT_TRACE',
   'CODEX_COMPAT_HOME',
 ];
@@ -45,6 +47,10 @@ assert.equal(defaults.upstream.baseUrl, null);
 assert.equal(defaults.upstream.basePath, '/v1');
 assert.equal(defaults.compat.stripAlways, true);
 assert.deepEqual(defaults.compat.thirdPartyPrefixes, ['ccs-', 'ccs/']);
+// 兼容策略缺省时仍应保护官方通道，并且不额外信任第三方不透明任务。
+assert.equal(defaults.compat.outputTokenReplay, 'auto');
+assert.equal(defaults.compat.requestCompression, 'auto');
+assert.deepEqual(defaults.compat.opaqueTaskModels, []);
 assert.equal(defaults.service.reclaim, 'auto');
 assert.equal(defaults.runtime.logLevel, 'info');
 // 中文注释：功能开关默认值——目录托管默认关闭（实测 Codex 0.160.1 不拉取 provider 级目录），纯官方保护默认开启
@@ -95,6 +101,8 @@ process.env.COMPAT_UPSTREAM_PORT = '16004';
 process.env.COMPAT_UPSTREAM_HOST = '127.0.0.2';
 process.env.COMPAT_UPSTREAM_BASE_URL = 'http://file-env.local/v1';
 process.env.COMPAT_STRIP_ALWAYS = '0';
+process.env.COMPAT_OUTPUT_TOKEN_REPLAY = 'strip';
+process.env.COMPAT_REQUEST_COMPRESSION = 'decode';
 process.env.COMPAT_TRACE = '1';
 const fromEnv = config.load({ home });
 assert.equal(fromEnv.listen.port, 16003);
@@ -102,13 +110,18 @@ assert.equal(fromEnv.upstream.port, 16004);
 assert.equal(fromEnv.upstream.host, '127.0.0.2');
 assert.equal(fromEnv.upstream.baseUrl, 'http://file-env.local/v1');
 assert.equal(fromEnv.compat.stripAlways, false);
+assert.equal(fromEnv.compat.outputTokenReplay, 'strip');
+assert.equal(fromEnv.compat.requestCompression, 'decode');
 assert.equal(fromEnv.runtime.trace, true);
 
 // 中文注释：用例 4 —— CLI 参数覆盖环境变量与配置文件
-const fromCli = config.load({ home, port: 16005, upstreamPort: 16006, reclaim: 'off' });
+const fromCli = config.load({ home, port: 16005, upstreamPort: 16006, reclaim: 'off', outputTokenReplay: 'preserve', requestCompression: 'preserve', opaqueTaskModels: ['vendor/gpt-model'] });
 assert.equal(fromCli.listen.port, 16005);
 assert.equal(fromCli.upstream.port, 16006);
 assert.equal(fromCli.service.reclaim, 'off');
+assert.equal(fromCli.compat.outputTokenReplay, 'preserve');
+assert.equal(fromCli.compat.requestCompression, 'preserve');
+assert.deepEqual(fromCli.compat.opaqueTaskModels, ['vendor/gpt-model']);
 assert.equal(fromCli.upstream.host, '127.0.0.2');
 
 // 中文注释：用例 5 —— CODEX_COMPAT_HOME 决定默认 home
@@ -144,6 +157,12 @@ assert.throws(() => config.validate(badBasePath), /upstream\.basePath 必须以 
 const badPrefixes = structuredClone(config.DEFAULTS);
 badPrefixes.compat.thirdPartyPrefixes = ['ccs-', 42];
 assert.throws(() => config.validate(badPrefixes), /compat\.thirdPartyPrefixes 必须是字符串数组/);
+// 不合法的兼容策略不得被当成 truthy 开关或无条件透传名单。
+for (const [key, value] of [['outputTokenReplay', 'unknown'], ['requestCompression', false], ['opaqueTaskModels', ['*']], ['opaqueTaskModels', ['']], ['opaqueTaskModels', [123]], ['stripAlways', 'false']]) {
+  const invalid = structuredClone(config.DEFAULTS);
+  invalid.compat[key] = value;
+  assert.throws(() => config.validate(invalid), new RegExp('compat\\.' + key));
+}
 // 中文注释：合法配置原样返回
 assert.equal(config.validate(structuredClone(config.DEFAULTS)).listen.port, 15731);
 
@@ -168,6 +187,10 @@ const toSave = config.load({ home });
 toSave.listen.port = 16009;
 toSave.service.reclaim = 'notify-only';
 toSave.features.deepseekRoles = false;
+// 策略必须随正常配置保存回读，不得把名单误存成字符串。
+toSave.compat.outputTokenReplay = 'strip';
+toSave.compat.requestCompression = 'decode';
+toSave.compat.opaqueTaskModels = ['ccs-vendor/gpt-model'];
 const savedFile = config.save(toSave, home);
 assert.equal(savedFile, path.join(home, 'config.json'));
 const rawSaved = JSON.parse(fs.readFileSync(savedFile, 'utf8'));
@@ -176,6 +199,9 @@ const reloaded = config.load({ home });
 assert.equal(reloaded.listen.port, 16009);
 assert.equal(reloaded.service.reclaim, 'notify-only');
 assert.equal(reloaded.features.deepseekRoles, false);
+assert.equal(reloaded.compat.outputTokenReplay, 'strip');
+assert.equal(reloaded.compat.requestCompression, 'decode');
+assert.deepEqual(reloaded.compat.opaqueTaskModels, ['ccs-vendor/gpt-model']);
 
 // 中文注释：用例 10 —— upstreamBaseUrl 优先使用显式 baseUrl，否则按 host/port/basePath 拼装
 // 中文注释：这里同样使用干净目录，才能断言默认端口 15721

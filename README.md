@@ -21,7 +21,7 @@ Detailed notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/COMPATIBI
 
 ## The problem it solves
 
-Codex Multi-Agent V2 puts the subagent task body into an `encrypted_content` container. That works when everything stays on one provider, and breaks as soon as a task crosses a provider boundary:
+Codex Multi-Agent V2 会使用 `encrypted_content` 委托容器；部分跨后端组合会出现以下故障，但不能据此断言所有第三方都不支持原生委托：
 
 | Symptom | Root cause |
 | --- | --- |
@@ -29,7 +29,7 @@ Codex Multi-Agent V2 puts the subagent task body into an `encrypted_content` con
 | An official child stream disconnects: `Encrypted function output content could not be decrypted or decoded.` | The container holds plaintext that the official backend nevertheless insists on decrypting |
 | The upstream rejects the request with HTTP 400 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'` | A delegated conversation starts with an orphan `function_call_output` (a delegation block) that has no matching `function_call`; official endpoints tolerate it, chat-protocol gateways reject the whole request |
 
-The container name is not bound to whether its content is actually encrypted: the official backend encrypts when it sees the `encrypted: true` marker, while a gateway ignores the marker and returns plaintext. Both outcomes end up inside the same `encrypted_content` container — that mismatch is the root cause of the whole class of failures.
+容器名不证明内容已经加密。历史故障中，部分网关忽略协作 schema 的加密标记并返回明文；另有同网关 GPT 支持自身的原生加密委托。不能把“第三方”或 `gpt-*` 名称直接等同于解密能力，更不能推断不同后端的密文互通。
 
 ## How it works
 
@@ -49,15 +49,15 @@ upstream  (default 127.0.0.1:15721, CC Switch local proxy;
    └── gateway models   -> third-party OpenAI-compatible gateway
 ```
 
-The layer is a transparent forwarder plus a small set of conditional rewrites. It never holds credentials, makes no routing decisions, and passes every header through unchanged.
+兼容层不接管上游路由或认证，认证头在内存中透传。HTTP 转发会执行既有 Host/hop-by-hop 规范化，并在正文表示改变时重算长度、移除失效压缩声明，不能把它描述为所有 header 字节不变。
 
 ### Three rewrite stages
 
 | Stage | Applies to | What it does |
 | --- | --- | --- |
-| **A — strip the encryption marker** | Official-parent requests that reference a third-party model (or every request when `compat.stripAlways` is on, which is the default) | Removes `encrypted: true` from the `message` property of the collaboration tools (`spawn_agent`, `send_message`, `followup_task`), so the official backend returns plaintext arguments instead of ciphertext |
+| **A — strip the encryption marker** | 默认覆盖所有父模型；关闭 `stripAlways` 时保留历史混用检测 | 仅删除三个已知协作工具的 `message.encrypted` 标记，从源头请求明文委托，不修改普通工具或正文 |
 | **B — project plaintext containers** | Every request | Moves plaintext out of `encrypted_content` containers into a standard `role: "user"` message. Needed for both downstream kinds: the official backend must not see plaintext in a container it will try to decrypt, and a gateway does not know the container block type at all |
-| **C — ciphertext delivery guard** | Requests whose downstream is a third-party model | If a real Fernet-style ciphertext (`gAAAAAB…`) would be delivered to a third-party child, the layer returns an explicit HTTP 400 (`compat_layer_reject`) instead of silently handing over an empty task |
+| **C — ciphertext delivery guard** | 当前路由未允许不透明任务的请求 | 保留原载荷并明确返回 HTTP 400；已知官方通道或显式精确名单可透传，但兼容层不解密，也不保证跨后端密文互通 |
 
 ### One input normalization
 
@@ -67,7 +67,7 @@ Gateway upstreams validate the chat protocol, where a `role: "tool"` message mus
 
 Tool call `arguments` must be valid JSON, and a gateway model occasionally writes an enum value as a bare word. On 2026-10-14 and again on 2026-10-16 one emitted `"fork_turns": none`: Codex failed to parse the call locally yet still stored the raw string in the thread history, and every later request in that conversation replayed it — so the gateway rejected the whole request with `HTTP 400 … input[572].arguments … invalid character 'o' in literal null (expecting 'u')` and retrying could never recover the conversation. Prompt hardening in the model template was already in place (verified in all three copies) when the second one happened, so it reduces the odds but does not remove them.
 
-Before forwarding, the layer therefore quotes bare words that sit in a value position. Only there: the scanner tracks string state, so the same text inside a message body is never touched. A repair is used only if the result parses as JSON, otherwise the body is forwarded unchanged — no half-fixed request is ever sent. Each repair logs an `args_repaired` event carrying the tool name and the bare word only (never the argument body) and increments `argsRepaired` on the health endpoint.
+Before forwarding, the layer therefore quotes bare words that sit in a value position. Only there: the scanner tracks string state, so the same text inside a message body is never touched. A repair is used only if the result parses as JSON, otherwise the body is forwarded unchanged — no half-fixed request is ever sent. 每次修复记录 `args_repaired` 事件与工具名、数量，不记录裸词或参数正文；健康端点累加 `argsRepaired`。
 
 ### Requirements
 
@@ -228,7 +228,7 @@ Precedence: command-line flags > environment variables > configuration file > de
   "version": 1,
   "listen": { "host": "127.0.0.1", "port": 15731 },
   "upstream": { "mode": "cc-switch", "host": "127.0.0.1", "port": 15721, "baseUrl": null, "basePath": "/v1" },
-  "compat": { "stripAlways": true, "thirdPartyPrefixes": ["ccs-", "ccs/"], "detection": "auto" },
+  "compat": { "stripAlways": true, "thirdPartyPrefixes": ["ccs-", "ccs/"], "detection": "auto", "outputTokenReplay": "auto", "requestCompression": "auto", "opaqueTaskModels": [] },
   "features": { "deepseekPrompt": true, "deepseekRoles": true, "providerCatalog": false, "officialGuard": true },
   "service": { "autoStart": true, "guard": true, "reclaim": "auto" },
   "runtime": { "logLevel": "info", "trace": false, "lang": "auto", "verbose": false }
@@ -239,7 +239,10 @@ Precedence: command-line flags > environment variables > configuration file > de
 | --- | --- |
 | `listen` | Where the layer listens. Loopback only by default |
 | `upstream` | Where rewritten traffic is forwarded. Either `host`/`port`, or `baseUrl` for a custom endpoint. `basePath` (default `/v1`) is the path prefix used when composing the address that Codex points at |
-| `compat.stripAlways` | `true` strips the encryption marker on every official-parent request; `false` narrows it to requests that reference a third-party model |
+| `compat.stripAlways` | `true` 默认对所有父模型剥离已知协作工具的加密标记；`false` 保留历史的官方父请求混用检测 |
+| `compat.outputTokenReplay` | `auto / strip / preserve`；自动模式只在已知官方通道保留输出回放选择器，对外部路由仅过滤 `output.encrypted_content`，不删除历史密文 |
+| `compat.requestCompression` | `auto / decode / preserve`；外部路由自动解压，正文已改写时 `preserve` 也不能保留旧编码声明 |
+| `compat.opaqueTaskModels` | 默认 `[]`；仅给已验证上游列出精确模型名称，不支持通配符，也不证明历史密文来源兼容 |
 | `compat.thirdPartyPrefixes` | Model id prefixes treated as third-party (`ccs-`, `ccs/` by default). Add your gateway's prefix scheme here |
 | `compat.detection` | Third-party detection mode (`auto`, or an explicit list) |
 | `features.deepseekPrompt` | Keep the fused DeepSeek prompt template in sync |
@@ -254,6 +257,14 @@ Precedence: command-line flags > environment variables > configuration file > de
 | `runtime.trace` | Diagnostic tracing flag; off by default. Trace output is only produced when tracing is switched on explicitly for a debugging session (see [PRIVACY.md](PRIVACY.md)) |
 | `runtime.lang` | Menu language: `auto` (detect once at install time), `zh`, or `en`. Also overridable per run with `CODEX_COMPAT_LANG` |
 | `runtime.verbose` | Persistent default for `--verbose` (default `false`); `--no-verbose` turns it off for a single run |
+
+### 输出回放、摘要与配置边界
+
+`output.encrypted_content` 是额外输出回放选择器，不是 `reasoning.encrypted_content`，也不是历史密文。自动策略只过滤前者；其他选择器、历史输出/推理/原生压缩密文和上游响应均保留。过滤不承诺保留原始输出 token 的精确回放收益，也不证明设备签发或跨后端密文可用。
+
+外部路由默认解压 `zstd / gzip / deflate`；解压、UTF-8 或 JSON 根节点检查失败在本地返回 400，超限返回 413，不转发坏字节。经 CC Switch 的摘要保留；绕过它时仅严格还原 `ccswitch-compaction-v1:` 文本为普通 user 消息，损坏或未知版本拒绝。这不恢复原始 token、缓存或全部工具状态。
+
+`compat.opaqueTaskModels` 和 `compat.thirdPartyPrefixes` 的配置 CLI 支持 JSON 字符串数组，例如 `codex-compat config set compat.opaqueTaskModels '["vendor/verified-model"]'`。名单只应包含已验证的精确模型。修改 `compat.*` 只保存兼容配置，不再同步模型目录；运行中的兼容进程仍需重新加载配置才会生效。`COMPAT_OUTPUT_TOKEN_REPLAY` 与 `COMPAT_REQUEST_COMPRESSION` 可临时覆盖文件中的对应策略。
 
 Read and write these from the CLI with dotted keys:
 
