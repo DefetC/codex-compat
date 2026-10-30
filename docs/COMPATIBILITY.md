@@ -5,12 +5,12 @@
 | 标记 | 含义 |
 | --- | --- |
 | 已实机验证 | 在真实机器上跑过安装、体检与跨 provider 派发，结论来自实际运行 |
-| 实验性 | 代码已实现并由 CI 覆盖，但尚未在真实机器上完整验证 |
+| 实验性 | 代码已实现，完整实机流程尚未验证；是否实际执行 CI 另行说明，不能把矩阵配置当成已验证结果 |
 | 已实现 | 代码路径已完成并有离线用例覆盖，尚未做系统性实机验证 |
 | 支持 | 设计上支持、路径已实现，未做系统化验证 |
 | 要求 | 硬性前置条件，不满足时安装会明确报错 |
 
-CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 18 / 20 / 22 三个主版本的组合上运行完整测试套件（`npm test`），因此「CI 覆盖」指的是跨平台分支会被真实执行，而不是实机功能验证。
+push/PR CI 在 `windows-latest`、`ubuntu-latest` × Node 18 / 20 / 22 上运行完整 `npm test`；只有手动 `workflow_dispatch` 才加入 `macos-latest`。2026-10-30 的实现提交 `287f915` 已通过六组 Windows/Ubuntu 测试及打包检查，macOS 本次未运行。`GITLEAKS_LICENSE` 未配置时 gitleaks 步骤跳过；作业为绿色不代表已执行密钥扫描。CI 不调用商业模型，也不替代真实安装与端到端派发验证。
 
 ## 已验证基线
 
@@ -25,7 +25,7 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 | 平台 | 状态 | 验证内容与说明 |
 | --- | --- | --- |
 | Windows 11 | 已实机验证 | 源码安装、配置备份与还原、登录自启（计划任务）、崩溃重启守护、系统通知，以及五种主控 × 子代理组合的跨 provider 派发；计划任务经 `wscript` 隐藏启动器执行，`guard` 每分钟运行不产生控制台窗口或焦点抢占；任务命名为 `CodexCompatService` / `CodexCompatServiceGuard`，并提供 `--cleanup-legacy` 清理旧命名任务。同时被 CI 覆盖 |
-| macOS | 实验性 | 服务托管使用 launchd agent，通知使用 `osascript`；由 CI（macos-latest，Node 18/20/22）覆盖，尚未实机验证 |
+| macOS | 实验性 | 服务托管使用 launchd agent，通知使用 `osascript`；仅配置手动 CI（macos-latest，Node 18/20/22），本次未运行，尚未实机验证 |
 | Linux | 实验性 | 服务托管使用 systemd user unit，通知使用 `notify-send`，不可用时退回 `zenity`；由 CI（ubuntu-latest，Node 18/20/22）覆盖，尚未实机验证 |
 
 三个平台共用同一套 Node.js 代码，差异集中在服务注册与系统通知两处适配层。
@@ -72,11 +72,11 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| 实验实例（lab） | 实验性 | `codex-compat instance create\|list\|status\|start\|stop\|env\|run\|refresh-catalog\|remove`（别名 `lab`）管理 `~/.codex-compat/instances/<名称>/` 下的自包含实例：独立 `CODEX_HOME`（实例目录 `codex/`）、独立兼容层运行目录（`compat/`）与独立端口（`15900`–`16000`，从 `15900` 起分配） |
+| 实验实例（lab） | 实验性 | `codex-compat instance create\|list\|status\|start\|stop\|env\|run\|refresh-catalog\|update\|remove`（别名 `lab`）管理 `~/.codex-compat/instances/<名称>/` 下的自包含实例：独立 `CODEX_HOME`（实例目录 `codex/`）、独立兼容层运行目录（`compat/`）与独立端口（`15900`–`16000`，从 `15900` 起分配） |
 | 计划任务 | 已实现 | 默认**不注册任何计划任务**，按需 `instance start` / `instance stop`；只有显式 `--autostart` 才注册 `CodexCompatService-<名称>` / `CodexCompatServiceGuard-<名称>` |
 | 密钥处理 | 已实现 | `--key` 写入实例目录 `secrets.env`（输出全程掩码）；`--key-env <变量名>` 完全不在磁盘留密钥；`instance run` 注入 `CODEX_HOME` 与密钥后启动 `codex`，`instance env` 只打印掩码与可复制命令 |
 | 用途 | 已实现 | 实验 / 多开；新用户可先建实例，用临时 Codex CLI 验证，再通过菜单首次接入向导接入主配置 |
-| 真实机器验证 | 未验证 | 由离线自检（`tests/instances.cjs`）覆盖；尚未在真实机器上跑完整的 `codex` 会话验证 |
+| 真实机器验证 | Windows 已验证，跨平台未验证 | Windows 本机已运行 lab 的完整 `codex exec` 会话，并确认顶层 `model_instructions_file` 的模板送达；macOS/Linux 的真实会话未验证。离线 `tests/instances.cjs` 仍覆盖创建、启停、密钥掩码和清理 |
 
 ## provider 模型目录托管
 
@@ -156,20 +156,21 @@ CI 在 `windows-latest`、`macos-latest`、`ubuntu-latest` 三个系统与 Node 
 
 1. `codex-compat status`：看是否已安装、是否在运行、监听地址与上游，以及 CC Switch 是否处于接管模式。
 2. `codex-compat doctor`：逐项检查端口、上游可达性、配置项、服务注册与 Multi-Agent V2 开关，并给出修复建议。它默认只读；确认后可用 `codex-compat doctor --fix` 自动重跑安装流程修复配置类问题。
-3. `codex-compat logs`：一次成功的跨 provider 派发应当产生带非零计数的 `rewrite` 事件；如果计数长期为零，说明请求没有经过兼容层，或请求形态已经变化。
+3. `codex-compat logs`：联合检查 `routeKind`、计数、`rejected` 和异常事件。非零可能来自选择器过滤、解压或拒绝，零也可能是合法透传，不能仅凭计数证明成功或认定链路异常。
 4. `codex-compat selftest` 包含离线改写用例及运行态探测：会访问健康端点、检查上游端口并执行映射预演，但不调用模型。纯离线改写检查是 `rewriteChecks()`，不能把网络探测也称为离线。
-5. 端到端验证：`npm test` 跑离线套件；`npm run test:smoke` 与 `npm run test:live` 是可选的真机在线检查，会消耗真实额度，不要放进 CI。
+5. 默认测试：`npm test` 不调用商业模型，但包括本机真实 HTTP；本次策略、代理边界、子代理证据和诊断包测试均已纳入。
+6. 真实子代理验收：显式设置要验证的原生 `CODEX_BIN`，再运行 `npm run test:regression -- FLASH-FLASH` 或全部九组合；默认只连本机代理，并清理每例身份副本与原始会话。`CODEX_TEST_MODELS` 可覆盖三个精确模型名。旧 `test:smoke` / `test:live` 仅辅助，不代替严格孩子证据。在线调用需账户和额度授权，不进入 CI；操作例子见 [贡献指南](../CONTRIBUTING.md)。
 
 ## 未验证项
 
 以下内容尚未验证，不应视为承诺：
 
 - macOS 与 Linux 的真实机器安装、自启、通知与端到端派发（目前只有 CI 覆盖）。
-- 实验实例（lab）已在 Windows 本机 + 真实第三方网关做过完整会话验证：`instance run <name> -- exec ...` 能正常返回，且代理侧 trace 到的 instructions 与仓库模板逐字符一致；macOS / Linux 上的真实 `codex` 会话仍未验证。离线自检覆盖创建、端口分配、密钥掩码、默认不自启、停止无残留、删除清理等。
+- 实验实例（lab）在 macOS/Linux 上的真实 `codex` 会话未验证；Windows 的完整会话和模板送达已在上方列为已验证，不能继续将全部 lab 流程标记为未验证。
 - CC Switch 场景下提示词的实际载体是环境里已有的模型目录条目（本机为 `~/.codex/cc-switch-model-catalog.json`，其 `ccs-deepseek/auto(free)` 与 `ccs-deepseek/deepseek-v4.1-flash` 条目的 `base_instructions` / `model_messages.instructions_template` 为 23,499 字符＝仓库模板），但**究竟是哪个配置指针把这份目录交给 Codex 尚未查明**（`~/.codex/config.toml` 里没有 `model_catalog_json`）：本工具只确认自己把模板写进了目录条目。另经实测，`~/.codex/models_cache.json` 是过期缓存（旧文件，其 DeepSeek 条目里的模板只有 68 字符），不是生效来源。
 - `model_catalog_url` 已实测在 Codex 0.160.1 不生效：该键已被 0.160.1 的 provider TOML 结构识别（写入不触发 unrecognized setting 警告），但 CLI 从不拉取它——配好合法 `model_catalog_url` 后 `codex debug models` 返回 `{"models":[]}`，兼容层 `/__compat/catalog` 请求数为 0；`codex features list` 显示 `api_key_model_discovery` 仍 under development、`remote_models` 已 removed，故需等 Codex 把「按 provider 配置发现模型目录」转正后重新回归，而不是等本机升级版本。提示词改由顶层键 `model_instructions_file` 送达（写进 `[model_providers.<id>]` 表内会被 Codex 忽略，lab 实例生成器已修正）。
 - 自建网关使用非默认模型 ID 前缀时的判定：`model_id_like` 已按末段匹配放宽，但前缀与末段的组合仍需按自身网关验证。
-- Codex CLI 0.156–0.159 的 provider 级目录门槛未做逐版本实机回归：该门槛来自设计约定（属保守假设），本工具唯一的实机基线是 0.160.1。
+- Codex CLI 0.156–0.159 的 provider 级目录门槛未做逐版本实机回归；门槛来自设计约定，是保守假设。历史安装/回退基线为 0.160.1，另有本次 0.163.0-alpha.10.2 的限定验收，两者不证明中间版本逐一兼容。
 - 纯官方保护在真实官方账号上的验证（当前由离线用例覆盖「纯官方 install 零写入」）。
 - 除 Codex 之外的其他客户端复用同一兼容层的场景。
 - 官方后端未来版本的行为变化；本工具依赖的标记语义不在任何公开契约内。

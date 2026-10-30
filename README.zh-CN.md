@@ -1,6 +1,6 @@
 # codex-compat
 
-`codex-compat` 是一个本机兼容层，用于保证 **Codex Multi-Agent V2 的子代理投递**在跨 provider 场景下依然可用：例如官方模型把任务派给 DeepSeek 之类的网关模型，或者网关模型把任务派回官方模型。
+`codex-compat` 是一个本机兼容层，用于修复 **Codex Multi-Agent V2 的子代理投递**在跨 provider 场景下的请求形态不兼容：例如官方模型把任务派给 DeepSeek 之类的网关模型，或者网关模型把任务派回官方模型。它不保证模型每轮都遵循编排指令，适用版本和验收边界见兼容性说明。
 
 它运行在你自己的机器上，位于 Codex 客户端与你已经在用的上游之间（默认是本地 CC Switch 代理，也可以是任意自定义 OpenAI 兼容端点），只改写真正会出问题的请求形态。
 
@@ -8,7 +8,7 @@
 | --- | --- |
 | npm 包名 | `codex-compat` |
 | CLI 命令 | `codex-compat` |
-| 版本 | 0.1.0 |
+| 源码版本 | 0.1.1（待发布） |
 | 许可 | MIT |
 | 运行时 | Node.js 18 及以上 |
 | 默认监听地址 | `127.0.0.1:15731` |
@@ -17,7 +17,17 @@
 
 **本项目是非官方社区项目，与 OpenAI、DeepSeek、CC Switch 均无隶属关系。** 它依赖 Codex 的未公开行为，Codex 升级后可能失效。`codex-compat bypass` 就是为这种情况准备的应急出口。
 
-深入文档：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+文档入口：[技术架构](docs/ARCHITECTURE.md)、[兼容性与验证状态](docs/COMPATIBILITY.md)、[发布与交接](docs/PUBLISHING.md)、[贡献指南](CONTRIBUTING.md)、[隐私说明](PRIVACY.md)、[安全报告](SECURITY.md)。
+
+## 0.1.1 本次新增（待发布）
+
+本轮针对 Responses 私有扩展、请求压缩和跨后端委托的差异做兼容修复，不是通用解密器。截至 2026-10-30 核对，npm 的 `latest` 仍为 `0.1.0`；源码版本、Git 推送和 npm 发布是三个不同状态，安装 npm 包不会自动取得尚未发布的 `0.1.1`。
+
+- 按实际路由处理输出选择器和压缩：新增 `outputTokenReplay`、`requestCompression`；仅精确过滤 `output.encrypted_content`，不清理历史密文，不改变上游 JSON/SSE 响应。
+- 默认所有父模型生成明文委托；`opaqueTaskModels` 只为经过验证的精确模型授权不透明任务透传。绕过 CC Switch 时，仅还原已验证的文本摘要封装。
+- `config set compat.*` 不再触发无关模型目录同步；诊断包结构化脱敏，新增选择器、解压和摘要计数，以及严格的孩子来源、模型、回答、完成、派发和等待证据。
+
+本次 Windows + Codex CLI `0.163.0-alpha.10.2` 的实测结果、两次 Flash 首轮失败和独立复核均见[兼容性说明](docs/COMPATIBILITY.md)。复核通过不代表旧失败根因已修复，也不保证每轮模型编排稳定。
 
 ## 它解决什么问题
 
@@ -28,6 +38,8 @@ Codex Multi-Agent V2 会使用 `encrypted_content` 委托容器；部分跨后�
 | 子代理正常启动，但说没有收到任务（Payload 为空） | 第三方网关不认识 `encrypted_content` 这个内容块类型，整块丢弃，模型只看到消息头 |
 | 官方子代理断流：`Encrypted function output content could not be decrypted or decoded.` | 容器里装的是明文，官方后端却一定要解密 |
 | 上游返回 HTTP 400：`Messages with role 'tool' must be a response to a preceding message with 'tool_calls'` | 委派创建的新会话以孤立的 `function_call_output`（委派块）开头，没有配对的 `function_call`；官方下游容忍，按 Chat 协议校验的网关会整单拒绝 |
+| 上游返回 HTTP 400：`Invalid value: 'output.encrypted_content'` | 实际外部端点不接受额外输出回放选择器；即使模型与官方同名，也不能推断支持该扩展 |
+| JSON 解析提示 `invalid character '('` | 已观察到 zstd 正文被不支持该编码的上游当作 JSON 解析；须核对实际编码，不能只凭错误文本断言所有同类错误都是压缩导致 |
 
 容器名不证明内容已经加密。历史故障中，部分网关忽略协作 schema 的加密标记并返回明文；另有同网关 GPT 支持自身的原生加密委托。不能把“第三方”或 `gpt-*` 名称直接等同于解密能力，更不能推断不同后端的密文互通。
 
@@ -61,7 +73,7 @@ codex-compat  （监听 127.0.0.1:15731，按条件转发 + 改写）
 
 ### 一项输入归一化
 
-网关上游按 Chat 协议校验，要求 `role: "tool"` 的消息必须紧跟带 `tool_calls` 的助手消息。兼容层因此会把孤立工具输出（例如「从其他任务发送」产生的委派块）改写为普通 `user` 消息并保留正文；空正文的孤立输出直接移除。配对正常的工具输出原样透传。
+部分上游按 Chat 协议校验，要求工具输出有配对的调用。兼容层在所有外部路由上处理孤立工具输出，包括自定义端点的同名 GPT：有正文时改写为普通 `user` 消息并保留正文，空正文时移除。已知官方通道不执行这项归一化；任何路由上配对正常的工具输出均保持原样。
 
 ### 非法工具参数修复
 
@@ -109,7 +121,7 @@ codex-compat status
 
 不想动主配置？
 
-- **零风险先试跑：** `codex-compat instance create <名称> --provider cc-switch --model <模型>`，再执行 `codex-compat instance run <名称>`——实例自带独立 `CODEX_HOME` 与独立端口，完全不动主配置。
+- **隔离实例先试跑：** `codex-compat instance create <名称> --provider cc-switch --model <模型>`，再执行 `codex-compat instance run <名称>`——实例自带独立 `CODEX_HOME` 与独立端口，完全不动主配置。
 - **想接入主配置：** `codex-compat install`。
 - **想反悔：** `codex-compat restore`（按安装清单精确还原）或 `codex-compat uninstall`（卸载时一并还原）。
 
@@ -119,7 +131,7 @@ codex-compat status
 2. 重启 Codex。配置在启动时读取，已开着的会话仍然使用旧配置。
 3. 执行 `codex-compat status` 看状态总览，或执行 `codex-compat doctor` 做一次完整体检（加 `--fix` 可以让它修复配置类问题）。
 4. 直接执行 `codex-compat`（不带参数）打开菜单，确认兼容层正在运行。
-5. 让 Codex 派一个网关模型的子代理，然后执行 `codex-compat logs`：一次成功的跨 provider 派发会产生带非零计数的 `rewrite` 事件。
+5. 让 Codex 实际派发子代理，并核对孩子自己的模型、回答、完成记录及父代理的派发/成功等待回参。`codex-compat logs` 的非零计数只说明观察到改写，过滤选择器、解压或拒绝也会产生日志，不能替代子代理验收。
 
 ## 命令
 
@@ -139,7 +151,8 @@ codex-compat status
 | `bypass` | 应急旁路：把安装清单里记录的原始上游地址写回 Codex 配置；兼容层仍在运行但不再参与流量。用 `repair` 重新接入 |
 | `restore` | 按安装清单还原 Codex 配置（原始 `base_url` + 回滚映射变更），并把清单标记为已还原；工具本身保留。`--force` 可越过「配置被外部修改」的保护 |
 | `uninstall` | 先 `stop` 再 `restore`；加 `--purge` 会一并删除运行目录，不加则保留运行目录 |
-| `selftest` | 跑离线改写用例 + 运行态自检：健康端点、上游可达性、映射预演；不调用模型 |
+| `bundle` / `diagnose` | 将状态、体检、配置及近期日志生成到本地诊断目录；先脱敏，不自动上传，分享前仍须人工检查 |
+| `selftest` | 跑 8 项纯改写检查 + 运行态自检：健康端点、上游可达性、映射预演；不调用模型，但不是完全离线命令 |
 | `version` / `help` | 查看版本，或查看内置用法说明 |
 | `instance` / `lab` | 多实例（实验 / 多开）管理：`create`、`list`、`status`、`start`、`stop`、`env`、`run`、`refresh-catalog`、`update`、`remove`；详见下方「实验实例」一节 |
 
@@ -148,7 +161,7 @@ codex-compat status
 | 参数 | 含义 |
 | --- | --- |
 | `--json` | 输出机器可读的 JSON，便于脚本与看板消费 |
-| `--dry-run` | 仅对 `install` / `repair` 生效：只打印改动计划，不写入任何内容 |
+| `--dry-run` | 在支持预演的命令中只报告不写入，例如 `install` / `repair`、`templates` 和 `instance update`；不代表所有命令都有预演，`doctor` 默认已只读 |
 | `--check` | `install` / `repair` 的 `--dry-run` 别名 |
 | `--yes` | 跳过交互确认。非交互终端必须加，否则无法应答确认提示 |
 | `--verbose` | 输出排查细节：解析出的路径、端口尝试明细、CC Switch 原始探测、映射诊断、异常堆栈与最近执行的系统命令；不加该参数时输出保持原样。也可通过 `runtime.verbose` 长期打开 |
@@ -242,8 +255,8 @@ codex-compat status
 | `compat.outputTokenReplay` | `auto / strip / preserve`；自动模式只在已知官方通道保留输出回放选择器，对外部路由仅过滤 `output.encrypted_content`，不删除历史密文 |
 | `compat.requestCompression` | `auto / decode / preserve`；外部路由自动解压，正文已改写时 `preserve` 也不能保留旧编码声明 |
 | `compat.opaqueTaskModels` | 默认 `[]`；仅给已验证上游列出精确模型名称，不支持通配符，也不证明历史密文来源兼容 |
-| `compat.thirdPartyPrefixes` | 判定为第三方的模型 ID 前缀（默认 `ccs-`、`ccs/`）。自建网关的前缀请在此补充 |
-| `compat.detection` | 第三方判定模式（`auto`，或显式列表） |
+| `compat.thirdPartyPrefixes` | 命名分类及 `stripAlways=false` 时的历史混用检测前缀，默认 `ccs-`、`ccs/`；自定义外部端点并不依赖该前缀才获得兼容处理 |
+| `compat.detection` | 历史保留字段，接受 `auto` 或数组；当前改写流程未使用它切换判定算法，实际策略由转发目标及其他兼容选项决定 |
 | `features.deepseekPrompt` | 是否持续同步融合版 DeepSeek 提示词模板 |
 | `features.deepseekRoles` | 是否持续维护 DeepSeek 子代理角色注册 |
 | `features.providerCatalog` | 无全局 `model_catalog_json` 时，是否托管 provider 级模型目录（详见「provider 模型目录托管」）。默认关闭：已实测在 Codex 0.160.1 不生效 |
@@ -259,11 +272,35 @@ codex-compat status
 
 ### 输出回放、摘要与配置边界
 
-`output.encrypted_content` 是额外输出回放选择器，不是 `reasoning.encrypted_content`，也不是历史密文。自动策略只过滤前者；其他选择器、历史输出/推理/原生压缩密文和上游响应均保留。过滤不承诺保留原始输出 token 的精确回放收益，也不证明设备签发或跨后端密文可用。
+`output.encrypted_content` 是额外输出回放选择器，不是 `reasoning.encrypted_content`，也不是历史密文。只在相应策略下移除顶层 `include` 中精确匹配的项；其他选择器、正文里的同名文本、历史输出/推理/原生压缩密文及上游 JSON/SSE 响应均保留。过滤不承诺原始输出 token 的精确回放收益，也不证明设备签发或跨后端密文可用。
 
-外部路由默认解压 `zstd / gzip / deflate`；解压、UTF-8 或 JSON 根节点检查失败在本地返回 400，超限返回 413，不转发坏字节。经 CC Switch 的摘要保留；绕过它时仅严格还原 `ccswitch-compaction-v1:` 文本为普通 user 消息，损坏或未知版本拒绝。这不恢复原始 token、缓存或全部工具状态。
+| 配置 | 值 | 精确行为 |
+| --- | --- | --- |
+| `outputTokenReplay` | `auto` | 已知官方通道保留输出选择器，所有外部路由过滤 |
+| `outputTokenReplay` | `strip` | 不论路由，只删除精确的 `output.encrypted_content` 选择器 |
+| `outputTokenReplay` | `preserve` | 保留该选择器；只有确认实际上游支持后才使用，可能重新触发上游 400 |
+| `requestCompression` | `auto` | 外部路由发送无压缩正文；已知官方通道在正文未改写时保留原压缩字节 |
+| `requestCompression` | `decode` | 将成功解压的正文以 UTF-8 转发 |
+| `requestCompression` | `preserve` | 仅在正文未改写时保留原压缩字节；不能保留改写后的旧编码声明 |
 
-`compat.opaqueTaskModels` 和 `compat.thirdPartyPrefixes` 的配置 CLI 支持 JSON 字符串数组，例如 `codex-compat config set compat.opaqueTaskModels '["vendor/verified-model"]'`。名单只应包含已验证的精确模型。修改 `compat.*` 只保存兼容配置，不再同步模型目录；运行中的兼容进程仍需重新加载配置才会生效。`COMPAT_OUTPUT_TOKEN_REPLAY` 与 `COMPAT_REQUEST_COMPRESSION` 可临时覆盖文件中的对应策略。
+原生通道按实际 HTTPS 主机 `chatgpt.com`、端口 `443` 及 `/backend-api/codex` 路径判定；CC Switch 官方分支使用既有模型命名约定，须确保它与真实路由一致。这些判定不认证密文来源；自定义上游的 `gpt-*` 名称不是官方能力证明。
+
+所有压缩策略都先验证 Responses 正文：支持 `zstd / gzip / deflate`，解压、UTF-8、JSON 或对象根检查失败返回 400；接收正文和解压结果分别受 64MB 限额约束，超限返回 413，不转发坏字节。fzstd 当前接口仍有结果检查前的预分配风险，不能视为完整 OOM 防护。
+
+经 CC Switch 保留其摘要封装；绕过它时仅严格还原 `ccswitch-compaction-v1:` 的 Base64 UTF-8 文本为普通 user 消息，损坏、空摘要或未知版本拒绝。原生压缩密文不解密，这项还原不恢复原始 token、缓存或全部工具状态。
+
+`opaqueTaskModels` 默认 `[]`，精确匹配当前接收任务的完整模型 ID，大小写敏感，不接受首尾空白或 `*` / `?`。名单只授权不透明任务透传，不关闭 `stripAlways`，不改变输出选择器或压缩策略，也不证明不同后端的密文互解。两个名单字段支持 JSON 字符串数组：
+
+```bash
+codex-compat config set compat.outputTokenReplay auto
+codex-compat config set compat.requestCompression auto
+# 仅在当前上游实际验证该接收模型支持不透明委托后设置
+codex-compat config set compat.opaqueTaskModels '["vendor/verified-model"]'
+```
+
+清空透传名单可用 `codex-compat config set compat.opaqueTaskModels '[]'`。修改 `compat.*` 只保存配置，不同步模型目录，也不自动重启代理。兼容策略在代理启动时读取；只改这些策略不需要重启 Codex 或 CC Switch，但须重载兼容代理。标准 `restart` 会执行 `stop` / `start`，重新注册服务并进入看门狗启动同步流程，不应称为“只重载代理”。
+
+`COMPAT_OUTPUT_TOKEN_REPLAY`、`COMPAT_REQUEST_COMPRESSION` 和 `COMPAT_STRIP_ALWAYS` 由代理进程的环境覆盖文件设置；只在另一个终端改变变量，不会影响已经运行的服务。配置 CLI 保存合并后的配置，使用环境覆盖时应核对最终持久化值。
 
 也可以用命令行按点号键读写这些配置：
 
@@ -303,7 +340,7 @@ codex-compat config set service.reclaim notify-only
 
 **当前状态：Codex 尚不支持这条路径，本项目仅作为未来可能的技术路线保留（默认关闭）。**
 
-没有全局 `model_catalog_json` 时，提示词模板只能通过 provider 级模型目录送达模型。兼容层在 `GET /__compat/catalog` 提供这份目录，并且只在**同时满足**以下两个条件时才给 provider 写 `model_catalog_url`：
+provider 级目录是备选送达路径，不是没有全局目录时的唯一方案：lab 的单供应商 home 可用顶层 `model_instructions_file`；共享主 home 不应为此覆盖所有模型的提示词。兼容层在 `GET /__compat/catalog` 提供目录，并且只在**同时满足**以下两个条件时才给 provider 写 `model_catalog_url`：
 
 - 没有全局 `model_catalog_json`；
 - 上游 `/models` **不是** Codex 原生目录——即返回的条目里没有 `model_messages` / `base_instructions` 字段。
@@ -342,7 +379,7 @@ codex-compat config set service.reclaim notify-only
 **Codex 升级后跨 provider 派发失效了怎么办？**
 
 1. 执行 `codex-compat doctor`，先看哪一项检查不通过。
-2. 执行 `codex-compat logs`，看 `rewrite` 计数。如果以前派发会有非零的 `stripped` / `projected` 计数，现在恒为 0，说明请求形态很可能变了。
+2. 执行 `codex-compat logs`，同时看 `routeKind`、各项计数、`rejected` 和异常事件。非零计数不证明任务成功，零计数也可能是合法透传；结合 `status` 的实际流量链路和独立孩子证据判断，不能仅凭计数认定请求形态变化。
 3. 执行 `codex-compat bypass` 先恢复工作，需要回到正常链路时执行 `codex-compat repair`。
 4. 执行 `codex-compat doctor --fix`（或 `repair`），把升级可能覆盖掉的配置重新写回。
 5. 如果请求形态确实变了，需要改的是代码里的改写规则，而不是配置。提缺陷时请附上 `doctor` 输出，以及（如已开启）脱敏后的追踪片段。
@@ -371,7 +408,15 @@ codex-compat uninstall --purge  # 同上，并删除运行目录
 
 **子代理还是说没有收到任务。**
 
-先确认你用的模型 ID 能被判定为第三方：默认前缀是 `ccs-` 与 `ccs/`。用 `codex-compat config get compat.thirdPartyPrefixes` 查看当前值；如果自建网关用的是别的 ID 方案，请在 `~/.codex-compat/config.json` 里补充前缀，然后执行 `codex-compat restart`。同时确认请求确实经过了兼容层：`codex-compat status` 会显示 Codex 当前的 `base_url` 以及它与兼容层地址是否一致。
+先用 `status` 确认请求经过当前兼容实例，再检查 `routeKind`、`compat_layer_reject`、派发任务是否正确及孩子自身记录。默认 `stripAlways=true` 已覆盖所有父模型，自定义外部端点不必先补前缀才获得处理。修改策略后须确认兼容代理已重载；遇到不透明任务不能仅通过加名单掩盖问题，应先验证当前上游支持该接收模型。
+
+**同名 GPT 为什么仍可能出现输出选择器 400？**
+
+模型名称不是后端能力证明。确认真实转发路由和 `compat.outputTokenReplay`；外部路由的 `auto` 只过滤 `output.encrypted_content`，不会删除历史密文。若显式配置了 `preserve`，上游仍可能拒绝该选择器。切回 `auto` 也不能修复已经损坏的历史会话。
+
+**Flash 首轮失败后，复核通过是否算问题已修复？**
+
+不能。缺少成功等待或孩子预期回答时严格判失败，保留原因；新的独立通过只证明该次链路可用，不定位原失败根因。在线回归记录包含孩子回答、完成信息、等待元数据及派发指纹；测试口令命中只作诊断，不替代成功条件。
 
 **CC Switch 显示直连模式。**
 
@@ -385,9 +430,9 @@ codex-compat uninstall --purge  # 同上，并删除运行目录
 
 | 维度 | 状态 |
 | --- | --- |
-| Windows | 已实机验证（安装、还原、自启、通知、五种派发组合） |
-| macOS | 代码已实现，标注 experimental；由 CI 覆盖，尚未实机验证 |
-| Linux | 代码已实现，标注 experimental；由 CI 覆盖，尚未实机验证 |
+| Windows | 历史安装、还原、自启和通知已实机验证；本次三类模型九种组合及多轮、工具、压缩验收见完整矩阵 |
+| macOS | 代码已实现，标注 experimental；只配置手动 CI 矩阵，本次未运行，尚无实机验证 |
+| Linux | 代码已实现，标注 experimental；Ubuntu 的 push/PR CI 已通过，尚无实机安装与派发验证 |
 | Node.js | 需要 18 及以上 |
 | Codex | 支持 Multi-Agent V2 的版本；依赖未公开行为，升级后需要重新验证 |
 | 上游 | CC Switch 本地代理（默认）与自定义 OpenAI 兼容端点 |
@@ -398,7 +443,9 @@ codex-compat uninstall --purge  # 同上，并删除运行目录
 
 ## 已验证基线与回退
 
-实测基线：**`@openai/codex` 0.160.1**，Windows 实机验证——主实例派发、lab 实例 `codex exec`、提示词逐字符送达；运行时要求 Node.js ≥ 18。macOS 与 Linux 目前只有 CI 覆盖，没有实机验证。
+历史安装、提示词与回退基线仍为 **`@openai/codex` 0.160.1**，`doctor` 的基线显示未变。本次另在 Windows + Node 22.14.0 + **Codex CLI `0.163.0-alpha.10.2`** 验收三类模型九种父子组合、多轮、工具、压缩后子代理和同孩子续聊，不将 alpha 验收替换成全部版本的支持承诺。
+
+push/PR CI 运行 Windows、Ubuntu × Node 18/20/22；macOS 只在手动 `workflow_dispatch` 时加入，本次未运行。CI 不执行商业模型回归，也不替代 macOS/Linux 的实机安装和派发验证。
 
 升级 Codex 后如果派发失效，按这个顺序回退：
 
@@ -410,7 +457,7 @@ codex-compat uninstall --purge  # 同上，并删除运行目录
 
 ## 安全
 
-本工具位于凭据链路上——它要代表你向上游转发请求。它不保存凭据、不记录认证头，也不会尝试解密官方密文。发现疑似漏洞请私下报告，方式见 [SECURITY.md](SECURITY.md)。
+本工具位于凭据链路上，转发认证头只在内存中使用，不写默认日志，也不解密官方密文。原始 URL 配置、备份及显式 `instance create --key` 的 `secrets.env` 仍可能含凭据，不可直接公开；诊断包也须人工复核。发现疑似漏洞请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## 参与贡献
 

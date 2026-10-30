@@ -13,7 +13,7 @@ Nothing else is sent anywhere. `selftest` and `doctor` make no model calls: thei
 
 ## What is stored, and where
 
-All runtime data stays inside the runtime home (`~/.codex-compat` by default, or `CODEX_COMPAT_HOME` / `--home` if you change it).
+兼容层自身的设置、日志、状态和备份存放在运行目录（默认 `~/.codex-compat`，可用 `CODEX_COMPAT_HOME` / `--home` 更改）。安装器还会按清单改写 Codex 的配置和模型目录；实验实例有独立 `CODEX_HOME`，主动在线回归则使用临时 home/workspace 并写入仓库的 `artifacts/`。这些范围不应混同于默认代理日志。
 
 | Data | Location | Contents |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ All runtime data stays inside the runtime home (`~/.codex-compat` by default, or
 
 Normal logs answer "did the rewrite happen, and how often", not "what was said":
 
-- Counters per event: requests seen, requests rewritten, markers stripped, plaintext containers projected, orphan tool outputs normalized, requests rejected, errors.
+- 进程内累计元数据：请求、改写、标记剥离、明文投影、孤立输出、参数修复、拒绝及异常；新增 `filteredOutputIncludes`、`decodedBodies`、`compactionSummariesProjected`。计数随进程重启重置，也可能来自拒绝或解压，不代表上游成功或孩子完成。
 - Model identity and event type, so you can tell official traffic from gateway traffic.
 - Error events for decode, parse, upstream, and listen failures. These describe the failure, not the payload.
 
@@ -66,9 +66,15 @@ Before changing a file, the installer stores a copy under `~/.codex-compat/backu
 
 诊断包写入 `~/.codex-compat/diagnostics/<timestamp>/`，包含状态、体检、配置和近期日志，不会自动上传。状态、配置及 JSONL 先按敏感字段结构化遮盖，再序列化；文本兜底完整遮盖 Bearer、密钥、Fernet 和 CC Switch 摘要封装，URL 的 userinfo 与敏感查询参数也会遮盖。无法解析的 JSONL 行明确省略并报告数量，不能把它当作完整记录。脱敏不等于可公开：分享前仍须人工检查路径、内部地址、提示词及任何不在已知规则中的敏感信息。
 
+## 主动在线回归的证据
+
+`npm run test:regression` 是开发者主动执行的真实模型实验，不属于默认代理日志。它会将独立孩子的测试回答、完成回答、来源/模型信息、等待元数据及派发口令命中/任务指纹写到 git 忽略的 `artifacts/regression/`；摘要产物不保存派发正文或认证。身份会复制到本次临时 home 使用，每例结束清理自己的临时身份副本与原始会话，故不能保证以后重建完整旧会话。
+
+测试只能使用已授权上游和合成任务。输出仍须人工检查，不能因目录被忽略或内容叫“测试证据”就公开真实业务回答、身份、内部地址或原生密文。线上回归不加入自动 CI；计数、HTTP 200、父代理口令和新一轮复核均不替代独立孩子证据。
+
 ## Data removal
 
-`codex-compat restore` rolls the Codex configuration back to what it was before installation, and `codex-compat uninstall` additionally stops the service and removes the autostart and guard registrations. Neither one deletes your runtime directory: add `--purge` to `uninstall` when you also want `~/.codex-compat` removed. Because the tool keeps no remote copy of anything, deleting the runtime home and any trace, backup, or diagnostic files you produced removes everything this tool has ever stored.
+`restore` 按安装清单还原 Codex 配置，`uninstall` 另外停止服务并移除自启/守护注册；默认都保留运行目录。`uninstall --purge` 才删除运行目录，但不会替你清理仓库外复制的诊断、追踪或仓库内主动生成的 `artifacts/`。在线驱动正常结束时清理本次临时身份和原始会话；额外复制的证据由使用者自己管理。兼容层没有远程回传副本，但不能据此宣称删除一个运行目录就删除了所有本地副本。
 
 ## Changes
 

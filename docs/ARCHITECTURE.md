@@ -104,7 +104,7 @@ Codex 客户端
     └─ 网关模型 → 第三方 OpenAI 兼容网关
 ```
 
-兼容层是**纯转发 + 条件改写**，不持有任何凭据，不做鉴权决策，所有 header 原样透传。监听地址默认只绑回环地址，上游地址与监听端口都可在配置里更换。
+兼容层是**转发 + 条件改写**，不决定用户如何鉴权；认证头在内存中透传，默认日志不记录它。HTTP 头会按既有规则规范化 Host 和 hop-by-hop 字段，正文表示变化时修正 `content-length` 并移除失效的 `content-encoding`，不是所有 header 字节原样透传。原始地址配置、备份及用户显式提供的实例密钥仍可能持久化，详见 [PRIVACY.md](../PRIVACY.md)。默认只监听回环地址。
 
 ### 4.2 四个改写阶段
 
@@ -144,12 +144,12 @@ if (遇到 opaque 密文) and (实际路由既不是已知官方通道，也未�
 
 宁可失败得明显，也不要让子代理拿到空任务却装作正常。这是从实际踩坑经验中提炼的：静默失败会让人以为是模型能力问题，浪费大量排查时间。
 
-**阶段 D：孤立工具输出归一化（仅网关下游）**
+**阶段 D：孤立工具输出归一化（所有外部路由）**
 
 目的：网关上游按 Chat 协议要求 `role=tool` 的消息必须紧跟带 `tool_calls` 的助手消息，委派块等孤立输出会让整个请求 400。
 
 ```
-if (下游是网关模型):
+if (实际路由为 cc-switch-external 或 external):
     收集请求内所有 function_call.call_id
     对每个 call_id 不在集合中的 function_call_output：
         有正文 → 改写为 {type:'message', role:'user', content:[{type:'input_text', text}]}
@@ -164,7 +164,22 @@ if (下游是网关模型):
 
 经 CC Switch 保留其摘要封装；绕过它时仅严格验证 `ccswitch-compaction-v1:` 的 Base64、UTF-8 和非空正文，投影为普通 user 消息。未知版本或损坏摘要明确拒绝，原生密文保持不变。摘要迁移不承诺恢复原始 token、缓存或全部工具状态，也不实现 WebSocket 服务端或设备签发模拟。
 
-健康统计新增 `filteredOutputIncludes`、`decodedBodies` 与 `compactionSummariesProjected`；默认事件日志只记录元数据，异常只保留类型和错误码。诊断包先结构化脱敏再序列化，损坏日志行明确省略，分享前仍须人工检查。
+健康统计新增 `filteredOutputIncludes`、`decodedBodies` 与 `compactionSummariesProjected`；默认事件日志只记录元数据，异常只保留类型和错误码。`bundle` / `diagnose` 先结构化脱敏再序列化，坏 JSONL 行替换为明确省略记录并计入 `omittedLogLines`；诊断文件不自动上传，分享前仍须人工检查。
+
+#### 统一策略入口
+
+`src/compat-policy.cjs` 同时供纯改写和 HTTP 转发使用，避免两处对同一目标作不同判定：
+
+| `routeKind` | 判定依据 | 默认输出选择器 | 默认压缩表示 | 不透明任务 |
+| --- | --- | --- | --- | --- |
+| `native-codex` | 实际 HTTPS 主机 `chatgpt.com`、端口 443、路径 `/backend-api/codex` | 保留 | 未改写时保留原字节 | 允许透传，不认证来源 |
+| `cc-switch-official` | `mode=cc-switch` 且官方命名、非第三方前缀 | 保留 | 未改写时保留原字节 | 按已有路由约定允许 |
+| `cc-switch-external` | CC Switch 其余模型命名 | 精确过滤 | 无压缩 UTF-8 | 仅精确名单允许 |
+| `external` | 其他自定义转发目标，包括同名 GPT | 精确过滤 | 无压缩 UTF-8 | 仅精确名单允许 |
+
+CC Switch 分支只是现有命名约定，须与真实路由吻合，不是上游身份认证。`outputTokenReplay=strip/preserve` 可分别强制过滤/保留该输出选择器；`requestCompression=decode/preserve` 分别指定解压表示/未改写时保留字节，任何模式都不豁免正文校验。`opaqueTaskModels` 按当前接收模型的完整名称大小写敏感匹配，拒绝首尾空白及通配符；名单不关闭 `stripAlways`，也不证明不同后端的密文互解。
+
+处理对象仅为 POST 路径末尾的 `/responses` 或 `/responses/compact`（允许末尾斜杠及查询串）。验证正文后依次执行协作 schema 剥离、选择器过滤、按需摘要还原和明文投影/不透明任务守卫；未拒绝时再归一化孤立输出及修复工具参数。只有语义变化才重新序列化；仅解压时保留原 JSON 文本。上游正常 JSON/SSE 正文字节不改写。
 
 ### 4.3 内容形态判定
 
@@ -179,8 +194,10 @@ if (下游是网关模型):
 模型身份判定：
 
 ```js
-isOfficialModel   = /^gpt-|^codex-|^o[0-9]/     // 官方后端托管
-isThirdPartyModel = 前缀匹配，默认 ['ccs-', 'ccs/']  // 网关模型，前缀可在配置中扩展
+// 官方命名分类，不是后端身份或私有扩展能力证明。
+isOfficialModel   = /^gpt-|^codex-|^o[0-9]/
+// 第三方命名分类及历史混用检测，前缀可配置。
+isThirdPartyModel = 前缀匹配，默认 ['ccs-', 'ccs/']
 ```
 
 这些正则只描述既有模型命名约定，不证明实际后端能力。`src/compat-policy.cjs` 结合已配置的 socket 主机、端口、协议、路径和 CC Switch 路由约定产生统一策略；自定义上游即使叫 `gpt-*` 也按外部路由保守处理。`stripAlways=true` 默认覆盖所有父请求；`false` 仅保留历史混用检测。精确的 `opaqueTaskModels` 是用户验证后的透传授权，不是任何历史密文的来源证明。
@@ -218,10 +235,11 @@ isThirdPartyModel = 前缀匹配，默认 ['ccs-', 'ccs/']  // 网关模型，�
 
 | 保护 | 值 |
 | --- | --- |
-| 请求体上限 | 64MB，超出返回 413 |
-| 解压 | 支持 zstd / gzip / deflate（Codex 用 zstd） |
-| 压缩头处理 | 改写后移除 `content-encoding`，因为原压缩已失效 |
-| 长度头处理 | 按改写后的实际长度重算 `content-length` |
+| 接收正文与解压结果 | 分别受默认 64MB 限额约束，超出返回 413 |
+| 解码与根校验 | 支持 zstd / gzip / deflate；非法编码、UTF-8、JSON 或非对象根本地返回 400 |
+| 分配限制 | gzip/deflate 使用解压分配限额；fzstd 在结果限额检查前仍可能预分配，不保证完整 OOM 防护 |
+| 压缩头处理 | 正文语义或压缩表示变化时移除失效的 `content-encoding` |
+| 长度头处理 | 按实际转发字节重算 `content-length`，不能发送原始长度或旧正文 |
 
 ### 6.3 日志
 
@@ -238,14 +256,40 @@ decode_error / listen_error / uncaught / unhandled_rejection
 
 ### 6.4 健康端点
 
-```
+```text
 GET http://127.0.0.1:15731/__compat/health
-→ {"name":"codex-compat","version":"0.1.0",
-   "port":15731,"upstreamHost":"127.0.0.1","upstreamPort":15721,
-   "mode":"cc-switch","uptimeMs":N,
-   "stats":{"requests":N,"rewritten":N,"stripped":N,"projected":N,
-            "orphanOutputs":N,"rejected":N,"errors":N}}
 ```
+
+以下是字段结构示例，不是验收实测计数：
+
+```json
+{
+  "name": "codex-compat",
+  "version": "0.1.1",
+  "home": "<运行目录>",
+  "instance": "main",
+  "port": 15731,
+  "upstreamHost": "127.0.0.1",
+  "upstreamPort": 15721,
+  "mode": "cc-switch",
+  "uptimeMs": 0,
+  "stats": {
+    "requests": 0,
+    "rewritten": 0,
+    "stripped": 0,
+    "projected": 0,
+    "orphanOutputs": 0,
+    "argsRepaired": 0,
+    "rejected": 0,
+    "errors": 0,
+    "filteredOutputIncludes": 0,
+    "decodedBodies": 0,
+    "compactionSummariesProjected": 0
+  }
+}
+```
+
+统计为进程内累计元数据，重启后归零。`filteredOutputIncludes` 计精确选择器剥离项，`decodedBodies` 计采用解压表示且未被兼容层拒绝的请求，`compactionSummariesProjected` 计摘要投影项；这些不是上游成功或孩子完成的证明，须同时检查拒绝和实际子代理证据。
 
 安装器与状态查询用它区分「端口空闲」「本工具旧实例」「被其他程序占用」，因此重复安装不会重复启动实例。
 
@@ -298,7 +342,11 @@ GET http://127.0.0.1:15731/__compat/health
 
 ### 7.2 配置优先级与运行目录
 
-生效优先级为：命令行参数 > 环境变量 > 配置文件 > 默认值。配置文件是 `~/.codex-compat/config.json`（可用 `CODEX_COMPAT_HOME` 或 `--home` 改运行态根目录），只保存地址、开关与策略，不保存任何凭据。运行态目录分工：
+配置加载优先级为：调用参数 > 代理进程环境变量 > 配置文件 > 默认值。文件位于 `~/.codex-compat/config.json`（可用 `CODEX_COMPAT_HOME` / `--home` 换目录）；默认字段是地址、开关与策略，但用户写入的 URL、自定义字段、原始备份或实例 `secrets.env` 可能含凭据，不能等同于脱敏诊断副本。
+
+`outputTokenReplay`、`requestCompression` 和 `opaqueTaskModels` 与其他兼容选项在代理启动时加载。`config set compat.*` 支持名单的 JSON 数组、保存前校验枚举及精确名称，只保存兼容配置，不调用 `mappings.apply`，也不自动重启；必须重载代理才生效。完整 `restart` 会执行 `stop/start` 并进入看门狗启动时的模板/映射同步，不是无副作用热加载。只修改兼容策略不需要重启 Codex 或 CC Switch。
+
+运行态目录分工：
 
 | 路径 | 用途 |
 | --- | --- |
@@ -381,13 +429,25 @@ GET http://127.0.0.1:15731/__compat/health
 
 结论：模型模板在**会话创建时**取用，切换已有会话的主控模型不会重取；要让 DeepSeek 模板生效需要新建会话。
 
+### 9.3 0.1.1 的限定验收
+
+2026-10-30 在 Windows + Node 22.14.0 + Codex CLI `0.163.0-alpha.10.2` 验收官方 GPT、第三方 GPT、DeepSeek Flash 的九种父子组合，以及多轮事实恢复、真实工具、压缩后工具与孩子、同孩子续聊和精确名单下的不透明委托。成功来自独立孩子来源和实际模型、自己的回答/完成记录、父派发回参及成功等待，不来自 HTTP 200、计数或父 stdout。
+
+Flash 首轮曾分别缺少成功等待或孩子预期回答，保留为失败；独立复核和额外有限三次通过不定位旧根因。最初原始会话已清理，不能重建完整失败原因。新增派发口令命中和 SHA-256 指纹、孩子回答及等待元数据只用于后续诊断，不放宽原有验收条件。完整组合和限制见 [COMPATIBILITY.md](COMPATIBILITY.md)。
+
+本地默认 26 组测试不调用商业模型，但包括真实本机 HTTP。实现提交的 Windows/Ubuntu × Node 18/20/22 CI 及打包已通过；macOS 仅配置手动矩阵，本次未运行。gitleaks 步骤被跳过时不算已扫描，在线商业模型回归不接入 CI。
+
 ## 十、已知边界与风险
 
 | 风险 | 说明 | 缓解 |
 | --- | --- | --- |
 | 依赖未公开行为 | 依赖「官方后端见标记即加密」这个行为 | 版本升级后重新回归验证 |
 | 上游重写目录 | 模型目录的 `multi_agent_version` 可能被上游工具改回或清空 | `codex-compat doctor` 体检与修复 |
-| schema 结构变更 | Codex 若改工具 schema 或容器字段名，判定会失效 | 观察 `rewrite` 日志计数 |
+| schema 结构变更 | Codex 若改工具 schema 或容器字段名，判定可能失效 | 联合检查路由、拒绝事件、实际 HTTP 字节及独立孩子证据，不能只看计数 |
+| 不透明任务来源 | 精确名单只授权当前接收模型透传，未知密文来源或格式不保证可用 | 默认空名单，保留明文化策略，只对经过验证的当前上游授权 |
+| 压缩分配 | fzstd 解压可能在结果检查前预分配 | 保留限额与本地拒绝，明确不是完整 OOM 防护 |
+| 模型编排偶发 | 正确路由仍可能出现错误回答或缺少成功等待 | 严格保留失败和独立复核，保存安全诊断，不宣称首轮全绿 |
+| 诊断可公开性 | 原始配置、备份、追踪和未知字段可能含敏感信息 | 结构化脱敏并人工检查，不直接上传原始产物 |
 | 纯本地工具 | 不是官方功能，无上游支持 | 有源码可自行维护 |
 | 提示词缓存 | 已启动的 Codex 会话不会热加载模型目录；实测切换主控模型也不会重取模板 | 重启 Codex 或新建会话 |
 | 跨平台服务 | macOS/Linux 分支已实现，但当前只在 Windows 实机验证 | 分别在目标系统运行安装、`doctor` 与守护回归 |

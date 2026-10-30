@@ -1,6 +1,6 @@
 # codex-compat
 
-`codex-compat` is a local compatibility layer that keeps **Codex Multi-Agent V2 subagent delivery** working when a task crosses a provider boundary — for example when an official model delegates to a gateway model such as DeepSeek, or when a gateway model delegates back to an official model.
+`codex-compat` 是一个本机兼容层，用于修复 **Codex Multi-Agent V2 的子代理投递**在跨 provider 场景下的请求形态不兼容：例如官方模型把任务派给 DeepSeek 之类的网关模型，或者网关模型把任务派回官方模型。它不保证模型每轮都遵循编排指令，适用版本和验收边界见兼容性说明。
 
 It runs on your machine, between the Codex client and the upstream endpoint you already use (a local CC Switch proxy by default, or any custom OpenAI-compatible endpoint), and rewrites only the request shapes that break.
 
@@ -8,7 +8,7 @@ It runs on your machine, between the Codex client and the upstream endpoint you 
 | --- | --- |
 | Package name | `codex-compat` |
 | CLI command | `codex-compat` |
-| Version | 0.1.0 |
+| Version | 0.1.1（源码候选，待发布） |
 | License | MIT |
 | Runtime | Node.js 18 or newer |
 | Default listen address | `127.0.0.1:15731` |
@@ -17,7 +17,17 @@ It runs on your machine, between the Codex client and the upstream endpoint you 
 
 **This is an unofficial community project, not affiliated with OpenAI, DeepSeek, or CC Switch.** It depends on undocumented Codex behaviour, so a future Codex upgrade can stop it from working. `codex-compat bypass` is the emergency escape hatch for exactly that situation.
 
-Detailed notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (currently written in Chinese).
+文档入口：[技术架构](docs/ARCHITECTURE.md)、[兼容性与验证状态](docs/COMPATIBILITY.md)、[发布与交接](docs/PUBLISHING.md)、[贡献指南](CONTRIBUTING.md)、[隐私说明](PRIVACY.md)、[安全报告](SECURITY.md)。
+
+## 0.1.1 本次新增（待发布）
+
+本轮针对 Responses 私有扩展、请求压缩和跨后端委托的差异做兼容修复，不是通用解密器。截至 2026-10-30 核对，npm 的 `latest` 仍为 `0.1.0`；源码版本、Git 推送和 npm 发布是三个不同状态，安装 npm 包不会自动取得尚未发布的 `0.1.1`。
+
+- 按实际路由处理输出选择器和压缩：新增 `outputTokenReplay`、`requestCompression`；仅精确过滤 `output.encrypted_content`，不清理历史密文，不改变上游 JSON/SSE 响应。
+- 默认所有父模型生成明文委托；`opaqueTaskModels` 只为经过验证的精确模型授权不透明任务透传。绕过 CC Switch 时，仅还原已验证的文本摘要封装。
+- `config set compat.*` 不再触发无关模型目录同步；诊断包结构化脱敏，新增选择器、解压和摘要计数，以及严格的孩子来源、模型、回答、完成、派发和等待证据。
+
+本次 Windows + Codex CLI `0.163.0-alpha.10.2` 的实测结果、两次 Flash 首轮失败和独立复核均见[兼容性说明](docs/COMPATIBILITY.md)。复核通过不代表旧失败根因已修复，也不保证每轮模型编排稳定。
 
 ## The problem it solves
 
@@ -28,6 +38,8 @@ Codex Multi-Agent V2 会使用 `encrypted_content` 委托容器；部分跨后�
 | The child agent starts normally but says it received no task (empty payload) | A third-party gateway does not understand the `encrypted_content` content block, so it drops the task body and the model only sees the message header |
 | An official child stream disconnects: `Encrypted function output content could not be decrypted or decoded.` | The container holds plaintext that the official backend nevertheless insists on decrypting |
 | The upstream rejects the request with HTTP 400 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'` | A delegated conversation starts with an orphan `function_call_output` (a delegation block) that has no matching `function_call`; official endpoints tolerate it, chat-protocol gateways reject the whole request |
+| 上游返回 HTTP 400：`Invalid value: 'output.encrypted_content'` | 实际外部端点不接受额外输出回放选择器；即使模型与官方同名，也不能推断支持该扩展 |
+| JSON 解析提示 `invalid character '('` | 已观察到 zstd 正文被不支持该编码的上游当作 JSON 解析；须核对实际编码，不能只凭错误文本断言所有同类错误都是压缩导致 |
 
 容器名不证明内容已经加密。历史故障中，部分网关忽略协作 schema 的加密标记并返回明文；另有同网关 GPT 支持自身的原生加密委托。不能把“第三方”或 `gpt-*` 名称直接等同于解密能力，更不能推断不同后端的密文互通。
 
@@ -61,7 +73,7 @@ upstream  (default 127.0.0.1:15721, CC Switch local proxy;
 
 ### One input normalization
 
-Gateway upstreams validate the chat protocol, where a `role: "tool"` message must be the response to a preceding `tool_calls` message. The compatibility layer therefore normalizes orphan tool outputs (for example the delegation block created by "send from another task") into ordinary `user` messages, keeping the body text intact; empty orphan outputs are dropped. Paired tool outputs pass through untouched.
+部分上游按 Chat 协议校验，要求工具输出有配对的调用。兼容层在所有外部路由上处理孤立工具输出，包括自定义端点的同名 GPT：有正文时改写为普通 `user` 消息并保留正文，空正文时移除。已知官方通道不执行这项归一化；任何路由上配对正常的工具输出均保持原样。
 
 ### Invalid tool arguments repair
 
@@ -109,7 +121,7 @@ Guided install scripts also ship in `install/`: `install.ps1` for PowerShell and
 
 Not ready to touch your main configuration?
 
-- **Zero-risk trial run:** `codex-compat instance create <name> --provider cc-switch --model <model>`, then `codex-compat instance run <name>` — an isolated `CODEX_HOME` and its own port; your main configuration is untouched.
+- **隔离实例先试跑：** `codex-compat instance create <name> --provider cc-switch --model <model>`, then `codex-compat instance run <name>` — an isolated `CODEX_HOME` and its own port; your main configuration is untouched.
 - **Wire up the main configuration:** `codex-compat install`.
 - **Changed your mind:** `codex-compat restore` (precise, manifest-driven rollback) or `codex-compat uninstall` (rolls back as well).
 
@@ -119,7 +131,7 @@ Full setup:
 2. Restart Codex. Codex reads its configuration at startup, so a running session keeps the old settings.
 3. Run `codex-compat status` for the one-screen overview, or `codex-compat doctor` for a full health check (add `--fix` to let it repair configuration-class problems).
 4. Open the interactive menu with `codex-compat` (no arguments) and confirm the layer is running.
-5. Ask Codex to spawn a subagent on a gateway model, and then check `codex-compat logs`: a working cross-provider delegation produces a `rewrite` event with a non-zero count.
+5. 让 Codex 实际派发子代理，并核对孩子自己的模型、回答、完成记录及父代理的派发/成功等待回参。`codex-compat logs` 的非零计数只说明观察到改写，过滤选择器、解压或拒绝也会产生日志，不能替代子代理验收。
 
 ## Commands
 
@@ -139,7 +151,8 @@ Full setup:
 | `bypass` | Emergency bypass: writes the original upstream address recorded in the install manifest back into the Codex configuration. The layer keeps running but is out of the traffic path; re-attach with `repair` |
 | `restore` | Restore the Codex configuration from the install manifest (original `base_url` plus rollback of the mapping changes) and mark the manifest as restored. The tool stays installed. `--force` overrides the "configuration was changed externally" guard |
 | `uninstall` | `stop` plus `restore`, and with `--purge` also deletes the runtime home directory. Without `--purge`, the runtime directory is kept |
-| `selftest` | Run the offline rewrite cases plus runtime checks: health endpoint, upstream reachability and a mapping dry-run. No model calls |
+| `bundle` / `diagnose` | 将状态、体检、配置及近期日志生成到本地诊断目录；先脱敏，不自动上传，分享前仍须人工检查 |
+| `selftest` | 跑 8 项纯改写检查 + 运行态自检：健康端点、上游可达性、映射预演；不调用模型，但不是完全离线命令 |
 | `version` / `help` | Print the version, or the built-in usage text |
 | `instance` / `lab` | Multi-instance (lab) management: `create`, `list`, `status`, `start`, `stop`, `env`, `run`, `refresh-catalog`, `update`, `remove`. See [Lab instances](#lab-instances-multi-instance) |
 
@@ -148,7 +161,7 @@ Full setup:
 | Flag | Meaning |
 | --- | --- |
 | `--json` | Machine-readable JSON output, for scripts and dashboards |
-| `--dry-run` | `install` / `repair` only: print the change plan and write nothing |
+| `--dry-run` | 在支持预演的命令中只报告不写入，例如 `install` / `repair`、`templates` 和 `instance update`；不代表所有命令都有预演，`doctor` 默认已只读 |
 | `--check` | Alias of `--dry-run` for `install` / `repair` |
 | `--yes` | Skip the interactive confirmation prompt. Required in a non-interactive shell, because the prompt cannot be answered there |
 | `--verbose` | Print troubleshooting detail: resolved paths, port-scan attempts, raw CC Switch detection, mapping diagnostics, exception stack traces, and the recent system commands that were executed. Without this flag the output is unchanged. It can also be turned on permanently through `runtime.verbose` |
@@ -163,7 +176,6 @@ Full setup:
 | `--refresh-templates` | During `install` / `repair`, also refresh templates and prompts under the managed rule (files you edited are not overwritten) |
 | `--force` | With `templates` / `--refresh-templates`: also overwrite templates you edited (backed up first) |
 | `--cleanup-legacy` | Also remove scheduled tasks left behind under the legacy `CodexCompatLayer` / `CodexCompatGuard` / `CodexCompatWatch` names |
-| `--home <dir>` | Runtime home directory; defaults to `~/.codex-compat` and can also be set with `CODEX_COMPAT_HOME` |
 
 Command-specific flags: `doctor --fix`, `logs --lines N --follow [--file <name>]`, `restore --force`, `uninstall [--purge] [--force]`, `install --no-service --no-deepseek-prompt --no-deepseek-roles` to switch off the corresponding pieces up front, and the `instance` subcommands listed under [Lab instances](#lab-instances-multi-instance).
 
@@ -243,8 +255,8 @@ Precedence: command-line flags > environment variables > configuration file > de
 | `compat.outputTokenReplay` | `auto / strip / preserve`；自动模式只在已知官方通道保留输出回放选择器，对外部路由仅过滤 `output.encrypted_content`，不删除历史密文 |
 | `compat.requestCompression` | `auto / decode / preserve`；外部路由自动解压，正文已改写时 `preserve` 也不能保留旧编码声明 |
 | `compat.opaqueTaskModels` | 默认 `[]`；仅给已验证上游列出精确模型名称，不支持通配符，也不证明历史密文来源兼容 |
-| `compat.thirdPartyPrefixes` | Model id prefixes treated as third-party (`ccs-`, `ccs/` by default). Add your gateway's prefix scheme here |
-| `compat.detection` | Third-party detection mode (`auto`, or an explicit list) |
+| `compat.thirdPartyPrefixes` | 命名分类及 `stripAlways=false` 时的历史混用检测前缀，默认 `ccs-`、`ccs/`；自定义外部端点并不依赖该前缀才获得兼容处理 |
+| `compat.detection` | 历史保留字段，接受 `auto` 或数组；当前改写流程未使用它切换判定算法，实际策略由转发目标及其他兼容选项决定 |
 | `features.deepseekPrompt` | Keep the fused DeepSeek prompt template in sync |
 | `features.deepseekRoles` | Keep the DeepSeek subagent roles registered |
 | `features.providerCatalog` | Host a provider-level model catalog when there is no global `model_catalog_json` (see [Provider model catalog hosting](#provider-model-catalog-hosting)). Off by default: verified as not effective on Codex 0.160.1 |
@@ -260,11 +272,35 @@ Precedence: command-line flags > environment variables > configuration file > de
 
 ### 输出回放、摘要与配置边界
 
-`output.encrypted_content` 是额外输出回放选择器，不是 `reasoning.encrypted_content`，也不是历史密文。自动策略只过滤前者；其他选择器、历史输出/推理/原生压缩密文和上游响应均保留。过滤不承诺保留原始输出 token 的精确回放收益，也不证明设备签发或跨后端密文可用。
+`output.encrypted_content` 是额外输出回放选择器，不是 `reasoning.encrypted_content`，也不是历史密文。只在相应策略下移除顶层 `include` 中精确匹配的项；其他选择器、正文里的同名文本、历史输出/推理/原生压缩密文及上游 JSON/SSE 响应均保留。过滤不承诺原始输出 token 的精确回放收益，也不证明设备签发或跨后端密文可用。
 
-外部路由默认解压 `zstd / gzip / deflate`；解压、UTF-8 或 JSON 根节点检查失败在本地返回 400，超限返回 413，不转发坏字节。经 CC Switch 的摘要保留；绕过它时仅严格还原 `ccswitch-compaction-v1:` 文本为普通 user 消息，损坏或未知版本拒绝。这不恢复原始 token、缓存或全部工具状态。
+| 配置 | 值 | 精确行为 |
+| --- | --- | --- |
+| `outputTokenReplay` | `auto` | 已知官方通道保留输出选择器，所有外部路由过滤 |
+| `outputTokenReplay` | `strip` | 不论路由，只删除精确的 `output.encrypted_content` 选择器 |
+| `outputTokenReplay` | `preserve` | 保留该选择器；只有确认实际上游支持后才使用，可能重新触发上游 400 |
+| `requestCompression` | `auto` | 外部路由发送无压缩正文；已知官方通道在正文未改写时保留原压缩字节 |
+| `requestCompression` | `decode` | 将成功解压的正文以 UTF-8 转发 |
+| `requestCompression` | `preserve` | 仅在正文未改写时保留原压缩字节；不能保留改写后的旧编码声明 |
 
-`compat.opaqueTaskModels` 和 `compat.thirdPartyPrefixes` 的配置 CLI 支持 JSON 字符串数组，例如 `codex-compat config set compat.opaqueTaskModels '["vendor/verified-model"]'`。名单只应包含已验证的精确模型。修改 `compat.*` 只保存兼容配置，不再同步模型目录；运行中的兼容进程仍需重新加载配置才会生效。`COMPAT_OUTPUT_TOKEN_REPLAY` 与 `COMPAT_REQUEST_COMPRESSION` 可临时覆盖文件中的对应策略。
+原生通道按实际 HTTPS 主机 `chatgpt.com`、端口 `443` 及 `/backend-api/codex` 路径判定；CC Switch 官方分支使用既有模型命名约定，须确保它与真实路由一致。这些判定不认证密文来源；自定义上游的 `gpt-*` 名称不是官方能力证明。
+
+所有压缩策略都先验证 Responses 正文：支持 `zstd / gzip / deflate`，解压、UTF-8、JSON 或对象根检查失败返回 400；接收正文和解压结果分别受 64MB 限额约束，超限返回 413，不转发坏字节。fzstd 当前接口仍有结果检查前的预分配风险，不能视为完整 OOM 防护。
+
+经 CC Switch 保留其摘要封装；绕过它时仅严格还原 `ccswitch-compaction-v1:` 的 Base64 UTF-8 文本为普通 user 消息，损坏、空摘要或未知版本拒绝。原生压缩密文不解密，这项还原不恢复原始 token、缓存或全部工具状态。
+
+`opaqueTaskModels` 默认 `[]`，精确匹配当前接收任务的完整模型 ID，大小写敏感，不接受首尾空白或 `*` / `?`。名单只授权不透明任务透传，不关闭 `stripAlways`，不改变输出选择器或压缩策略，也不证明不同后端的密文互解。两个名单字段支持 JSON 字符串数组：
+
+```bash
+codex-compat config set compat.outputTokenReplay auto
+codex-compat config set compat.requestCompression auto
+# 仅在当前上游实际验证该接收模型支持不透明委托后设置
+codex-compat config set compat.opaqueTaskModels '["vendor/verified-model"]'
+```
+
+清空透传名单可用 `codex-compat config set compat.opaqueTaskModels '[]'`。修改 `compat.*` 只保存配置，不同步模型目录，也不自动重启代理。兼容策略在代理启动时读取；只改这些策略不需要重启 Codex 或 CC Switch，但须重载兼容代理。标准 `restart` 会执行 `stop` / `start`，重新注册服务并进入看门狗启动同步流程，不应称为“只重载代理”。
+
+`COMPAT_OUTPUT_TOKEN_REPLAY`、`COMPAT_REQUEST_COMPRESSION` 和 `COMPAT_STRIP_ALWAYS` 由代理进程的环境覆盖文件设置；只在另一个终端改变变量，不会影响已经运行的服务。配置 CLI 保存合并后的配置，使用环境覆盖时应核对最终持久化值。
 
 Read and write these from the CLI with dotted keys:
 
@@ -304,7 +340,7 @@ Both sources are credited in text; no third-party tooling, memory layer or runti
 
 **Status: Codex does not support this path yet.** It ships implemented and **off by default**, kept only as a possible future route.
 
-With no global `model_catalog_json`, prompt templates can only reach a model through a provider-level catalog. The compatibility layer serves one at `GET /__compat/catalog`, and writes `model_catalog_url` into the provider only when **both** of these hold:
+provider 级目录是备选送达路径，不是没有全局目录时的唯一方案：lab 的单供应商 home 可用顶层 `model_instructions_file`；共享主 home 不应为此覆盖所有模型的提示词。兼容层在 `GET /__compat/catalog` 提供目录，并且只在**同时满足**以下两个条件时才给 provider 写 `model_catalog_url`：
 
 - there is no global `model_catalog_json`, and
 - the upstream `/models` response is **not** already a Codex-native catalog — that is, its entries carry no `model_messages` / `base_instructions` fields.
@@ -343,7 +379,7 @@ Full details: [PRIVACY.md](PRIVACY.md).
 **A Codex upgrade broke cross-provider delivery.**
 
 1. Run `codex-compat doctor` and read the failing checks.
-2. Run `codex-compat logs` and look at the `rewrite` counters. If delegation used to produce non-zero `stripped` / `projected` counts and now produces zero, the request shape has most likely changed.
+2. 执行 `codex-compat logs`，同时看 `routeKind`、各项计数、`rejected` 和异常事件。非零计数不证明任务成功，零计数也可能是合法透传；结合 `status` 的实际流量链路和独立孩子证据判断，不能仅凭计数认定请求形态变化。
 3. Run `codex-compat bypass` to unblock your work immediately, and `codex-compat repair` when you want the layer back in the path.
 4. Run `codex-compat doctor --fix` (or `repair`) to re-apply the configuration that an upgrade may have overwritten.
 5. If the request shape really changed, the rewrite rules need a code change, not a configuration change. Include the `doctor` output and (if enabled) a redacted trace when you report it.
@@ -372,7 +408,15 @@ To move the port afterwards, run `codex-compat config set listen.port <n>` follo
 
 **The subagent still reports an empty task.**
 
-Check that your model ids are recognized as third-party: the default prefixes are `ccs-` and `ccs/`. Inspect the current value with `codex-compat config get compat.thirdPartyPrefixes`; if your gateway uses a different id scheme, add its prefix in `~/.codex-compat/config.json` and run `codex-compat restart`. Also confirm that the request actually passes through the layer — `codex-compat status` shows the `base_url` Codex currently has and whether it matches the layer.
+先用 `status` 确认请求经过当前兼容实例，再检查 `routeKind`、`compat_layer_reject`、派发任务是否正确及孩子自身记录。默认 `stripAlways=true` 已覆盖所有父模型，自定义外部端点不必先补前缀才获得处理。修改策略后须确认兼容代理已重载；遇到不透明任务不能仅通过加名单掩盖问题，应先验证当前上游支持该接收模型。
+
+**同名 GPT 为什么仍可能出现输出选择器 400？**
+
+模型名称不是后端能力证明。确认真实转发路由和 `compat.outputTokenReplay`；外部路由的 `auto` 只过滤 `output.encrypted_content`，不会删除历史密文。若显式配置了 `preserve`，上游仍可能拒绝该选择器。切回 `auto` 也不能修复已经损坏的历史会话。
+
+**Flash 首轮失败后，复核通过是否算问题已修复？**
+
+不能。缺少成功等待或孩子预期回答时严格判失败，保留原因；新的独立通过只证明该次链路可用，不定位原失败根因。在线回归记录包含孩子回答、完成信息、等待元数据及派发指纹；测试口令命中只作诊断，不替代成功条件。
 
 **CC Switch says it is in direct mode.**
 
@@ -386,9 +430,9 @@ Every write is backed up, recorded in the install manifest, and reversible with 
 
 | Dimension | Status |
 | --- | --- |
-| Windows | Verified on a real machine (install, restore, autostart, notifications, five delegation combinations) |
-| macOS | Implemented, experimental; covered by CI, not yet verified on real hardware |
-| Linux | Implemented, experimental; covered by CI, not yet verified on real hardware |
+| Windows | 历史安装、还原、自启和通知已实机验证；本次三类模型九种组合及多轮、工具、压缩验收见完整矩阵 |
+| macOS | 代码已实现，标注 experimental；只配置手动 CI 矩阵，本次未运行，尚无实机验证 |
+| Linux | 代码已实现，标注 experimental；Ubuntu 的 push/PR CI 已通过，尚无实机安装与派发验证 |
 | Node.js | 18 or newer required |
 | Codex | Multi-Agent V2 capable versions; depends on undocumented behaviour, so re-verify after upgrades |
 | Upstream | CC Switch local proxy (default) and custom OpenAI-compatible endpoints |
@@ -399,7 +443,9 @@ The full matrix, including per-combination results: [docs/COMPATIBILITY.md](docs
 
 ## Verified baseline and rollback
 
-Verified baseline: **`@openai/codex` 0.160.1**, on Windows real hardware — main-instance delegation, `codex exec` in a lab instance, and prompt delivery verified character by character. Node.js ≥ 18 is required. macOS and Linux are covered by CI only; they have not been verified on real hardware.
+历史安装、提示词与回退基线仍为 **`@openai/codex` 0.160.1**，`doctor` 的基线显示未变。本次另在 Windows + Node 22.14.0 + **Codex CLI `0.163.0-alpha.10.2`** 验收三类模型九种父子组合、多轮、工具、压缩后子代理和同孩子续聊，不将 alpha 验收替换成全部版本的支持承诺。
+
+push/PR CI 运行 Windows、Ubuntu × Node 18/20/22；macOS 只在手动 `workflow_dispatch` 时加入，本次未运行。CI 不执行商业模型回归，也不替代 macOS/Linux 的实机安装和派发验证。
 
 If a Codex upgrade breaks delegation, roll back in this order:
 
@@ -411,7 +457,7 @@ If a Codex upgrade breaks delegation, roll back in this order:
 
 ## Security
 
-This tool sits in the path that carries your credentials, because it forwards requests to your upstream. It never stores credentials, never logs authentication headers, and never attempts to decrypt official ciphertext. Please report suspected vulnerabilities privately — see [SECURITY.md](SECURITY.md).
+本工具位于凭据链路上，转发认证头只在内存中使用，不写默认日志，也不解密官方密文。原始 URL 配置、备份及显式 `instance create --key` 的 `secrets.env` 仍可能含凭据，不可直接公开；诊断包也须人工复核。发现疑似漏洞请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## Contributing
 
